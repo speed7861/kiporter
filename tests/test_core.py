@@ -161,3 +161,34 @@ def test_platform_detection_does_not_crash():
 def test_modules_import(mod):
     import importlib
     assert importlib.import_module(f"kiporter.{mod}")
+
+
+def test_fab_profiles_and_custom(tmp_path):
+    from kiporter import fab
+    from kiporter.config import Settings
+    jlc = fab.get_profile("JLCPCB")
+    assert "--no-x2" in jlc.gerber_flags and "--excellon-units" in jlc.drill_flags
+    s = Settings()
+    s.custom_fab_profiles = []
+    s.custom_fab_profiles = [{"name": "Mine", "layers": ["F.Cu", fab.INNER, "B.Cu"], "drill_separate_th": True,
+                              "drill_map": "none", "x2": False}]
+    m = fab.get_profile("Mine", s)
+    assert m.custom and m.layers('(layers (2 "In1.Cu" signal)) (setup') == ["F.Cu", "In1.Cu", "B.Cu"]
+    assert "--excellon-separate-th" in m.drill_flags and "--generate-map" not in m.drill_flags
+    assert fab.get_profile("Use the board's own plot settings").gerber_flags == ["--board-plot-params"]
+
+
+def test_kicad_bom_templates_from_project(tmp_path):
+    import json
+    from kiporter import bom, kicad_env
+    pro = tmp_path / "p.kicad_pro"
+    pro.write_text(json.dumps({"schematic": {
+        "bom_settings": {"fields_ordered": [{"name": "Reference", "label": "Ref", "show": True, "group_by": False},
+                                            {"name": "Value", "label": "Value", "show": True, "group_by": True}]},
+        "bom_presets": [{"name": "Mine", "fields_ordered": [{"name": "MPN", "label": "MPN", "show": True}]}],
+        "bom_fmt_presets": [{"name": "Pipes", "field_delimiter": "|"}]}}), encoding="utf-8")
+    ki = kicad_env.KiCadInstall("10.0", tmp_path)
+    names = [t.name for t in bom.kicad_templates(pro, ki)]
+    assert names[0].startswith(bom.KICAD_PREFIX + "Project BOM settings")
+    assert any("Mine" in n for n in names) and any("Grouped By Value" in n for n in names)
+    assert "Pipes (project preset)" in bom.kicad_formats(pro)

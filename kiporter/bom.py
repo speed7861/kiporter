@@ -375,3 +375,178 @@ def write_stock_report(lines: list[BomLine], sources: list[str], boards: int, pa
                 row += [o or "", "", "", ""]
         rows.append(row)
     return write_table(rows, path, "Stock")
+
+
+# ==================================================================== KiCad's own BOM templates
+# kicad-cli's --preset option writes empty files for the built-in presets in some KiCad
+# versions, so every preset is translated into explicit --fields/--labels/--group-by arguments.
+KICAD_LABELS = {"Reference": "Refs", "${QUANTITY}": "Qty", "${DNP}": "DNP", "${ITEM_NUMBER}": "#",
+                "${EXCLUDE_FROM_BOM}": "Exclude from BOM", "${EXCLUDE_FROM_BOARD}": "Exclude from Board",
+                "${EXCLUDE_FROM_SIM}": "Exclude from Simulation"}
+_STD = ["Reference", "Value", "Datasheet", "Footprint", "${QUANTITY}", "${DNP}"]
+KICAD_BUILTIN_PRESETS = {
+    "Grouped By Value": (_STD, ["Value", "${DNP}"]),
+    "Grouped By Value and Footprint": (_STD, ["Value", "Footprint", "${DNP}"]),
+    "Attributes": (["Reference", "Value", "${DNP}", "${EXCLUDE_FROM_BOM}", "${EXCLUDE_FROM_SIM}",
+                    "${EXCLUDE_FROM_BOARD}"], []),
+}
+KICAD_BUILTIN_FORMATS = {
+    "CSV": {"field_delimiter": ",", "string_delimiter": '"', "ref_delimiter": ",", "ref_range_delimiter": ""},
+    "TSV": {"field_delimiter": "\t", "string_delimiter": "", "ref_delimiter": ",", "ref_range_delimiter": ""},
+    "Semicolons": {"field_delimiter": ";", "string_delimiter": "'", "ref_delimiter": ",",
+                   "ref_range_delimiter": ""},
+}
+KICAD_PREFIX = "KiCad: "
+
+
+@dataclass
+class KicadTemplate:
+    name: str  # shown in the format list, starts with KICAD_PREFIX
+    kind: str  # "preset" | "plugin"
+    fields: list[str] = field(default_factory=list)
+    labels: list[str] = field(default_factory=list)
+    group_by: list[str] = field(default_factory=list)
+    sort_field: str = "Reference"
+    sort_asc: bool = True
+    filter: str = ""
+    exclude_dnp: bool = False
+    command: list[str] = field(default_factory=list)  # plugin: [script, extension]
+    source: str = ""
+
+
+def _read_json(p: Path) -> dict:
+    import json
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _from_preset(name: str, p: dict, source: str) -> KicadTemplate | None:
+    ordered = [f for f in p.get("fields_ordered") or [] if f.get("name")]
+    shown = [f for f in ordered if f.get("show")]
+    if not shown:
+        return None
+    return KicadTemplate(
+        name=KICAD_PREFIX + name, kind="preset", fields=[f["name"] for f in shown],
+        labels=[f.get("label") or KICAD_LABELS.get(f["name"], f["name"]) for f in shown],
+        group_by=[f["name"] for f in ordered if f.get("group_by")], sort_field=p.get("sort_field") or "Reference",
+        sort_asc=bool(p.get("sort_asc", True)), filter=p.get("filter_string") or "",
+        exclude_dnp=bool(p.get("exclude_dnp")), source=source)
+
+
+def _plugin_dirs(ki: KiCadInstall) -> list[Path]:
+    dirs = []
+    if ki.cli and Path(ki.cli[0]).exists():
+        dirs.append(Path(ki.cli[0]).parent / "scripting" / "plugins")
+    if ki.share_dir:
+        dirs += [ki.share_dir / "plugins", ki.share_dir / "scripting" / "plugins"]
+    return [d for d in dirs if d.is_dir()]
+
+
+def kicad_templates(project_file: Path, ki: KiCadInstall) -> list[KicadTemplate]:
+    """BOM templates KiCad knows about: project settings and presets, built-in presets, BOM plugin scripts."""
+    out: list[KicadTemplate] = []
+    sch = _read_json(project_file).get("schematic", {})
+    if sch.get("bom_settings"):
+        t = _from_preset("Project BOM settings (as set up in KiCad)", sch["bom_settings"], "project")
+        if t:
+            out.append(t)
+    for p in sch.get("bom_presets") or []:
+        t = _from_preset(f"{p.get('name', 'Preset')} (project preset)", p, "project")
+        if t:
+            out.append(t)
+    for name, (flds, groups) in KICAD_BUILTIN_PRESETS.items():
+        out.append(KicadTemplate(KICAD_PREFIX + name, "preset", list(flds), [KICAD_LABELS.get(f, f) for f in flds],
+                                 list(groups), source="built-in"))
+    seen: set[str] = set()
+    for plugin in (_read_json(ki.config_dir / "eeschema.json").get("bom", {}) or {}).get("plugins") or []:
+        m = re.search(r'["\']?([^"\']+\.py)["\']?', plugin.get("command", ""))
+        ext = re.search(r"%O(\.\w+)", plugin.get("command", ""))
+        if m and Path(m.group(1)).exists() and Path(m.group(1)).name not in seen:
+            seen.add(Path(m.group(1)).name)
+            out.append(KicadTemplate(f"{KICAD_PREFIX}{plugin.get('name') or Path(m.group(1)).stem} (BOM plugin)",
+                                     "plugin", command=[m.group(1), ext.group(1) if ext else ".csv"], source="user"))
+    for d in _plugin_dirs(ki):
+        for script in sorted(d.glob("bom*.py")):
+            if script.name in seen:
+                continue
+            seen.add(script.name)
+            ext = ".html" if "html" in script.stem else ".txt" if "txt" in script.stem else ".csv"
+            out.append(KicadTemplate(f"{KICAD_PREFIX}{script.stem} (BOM plugin)", "plugin",
+                                     command=[str(script), ext], source="kicad"))
+    return out
+
+
+def kicad_formats(project_file: Path) -> dict[str, dict]:
+    sch = _read_json(project_file).get("schematic", {})
+    fmts = dict(KICAD_BUILTIN_FORMATS)
+    if sch.get("bom_fmt_settings"):
+        fmts["Project format (as set up in KiCad)"] = sch["bom_fmt_settings"]
+    for p in sch.get("bom_fmt_presets") or []:
+        fmts[f"{p.get('name', 'Format')} (project preset)"] = p
+    return fmts
+
+
+def _python_exe() -> str:
+    import sys
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe" and (exe.parent / "python.exe").exists():
+        return str(exe.parent / "python.exe")
+    return str(exe)
+
+
+def export_kicad_template(t: KicadTemplate, project_file: Path, ki: KiCadInstall, out_dir: Path, base: str,
+                          fmt: dict | None = None) -> list[Path]:
+    sch = project_file.with_suffix(".kicad_sch")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tag = re.sub(r"[^A-Za-z0-9]+", "_", t.name[len(KICAD_PREFIX):]).strip("_")
+    if t.kind == "plugin":
+        script, ext = t.command
+        with tempfile.TemporaryDirectory() as td:
+            xml = Path(td) / "netlist.xml"
+            r = subprocess.run(ki.cli_cmd("sch", "export", "python-bom", sch, "-o", xml), capture_output=True,
+                               text=True, timeout=300, creationflags=NO_WINDOW)
+            if not xml.exists():
+                raise RuntimeError(f"kicad-cli netlist export failed: {(r.stderr or r.stdout).strip()}")
+            out = out_dir / f"{base}_BOM_{tag}{ext}"
+            r = subprocess.run([_python_exe(), script, str(xml), str(out)], capture_output=True, text=True,
+                               timeout=300, creationflags=NO_WINDOW, cwd=str(Path(script).parent))
+        made = [p for p in out_dir.glob(f"{base}_BOM_{tag}*") if p.is_file()]
+        if not made:
+            raise RuntimeError(f"BOM plugin produced no file: {(r.stderr or r.stdout).strip()[:400]}")
+        return made
+    fmt = fmt or KICAD_BUILTIN_FORMATS["CSV"]
+    ext = ".tsv" if fmt.get("field_delimiter") == "\t" else ".csv"
+    out = out_dir / f"{base}_BOM_{tag}{ext}"
+    args = ["sch", "export", "bom", sch, "-o", out, "--fields", ",".join(t.fields), "--labels",
+            ",".join(l.replace(",", " ") for l in t.labels), "--sort-field", t.sort_field,
+            "--field-delimiter", fmt.get("field_delimiter", ","), "--string-delimiter", fmt.get("string_delimiter", ""),
+            "--ref-delimiter", fmt.get("ref_delimiter", ","), "--ref-range-delimiter", fmt.get("ref_range_delimiter", "")]
+    if t.group_by:
+        args += ["--group-by", ",".join(t.group_by)]
+    if t.filter:
+        args += ["--filter", t.filter]
+    if t.exclude_dnp:
+        args.append("--exclude-dnp")
+    if fmt.get("keep_tabs"):
+        args.append("--keep-tabs")
+    if fmt.get("keep_line_breaks"):
+        args.append("--keep-line-breaks")
+    r = subprocess.run(ki.cli_cmd(*args), capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW)
+    if r.returncode != 0 or not out.exists():
+        raise RuntimeError(f"kicad-cli BOM export failed: {(r.stderr or r.stdout).strip()}")
+    return [out]
+
+
+def preview_rows(path: Path, limit: int = 60) -> list[list[str]]:
+    """Rows of a written CSV/TSV for previewing (HTML/TXT plugin output: lines)."""
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    if path.suffix.lower() in (".csv", ".tsv"):
+        sample = text[:4000]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+            return list(csv.reader(text.splitlines(), dialect))[:limit]
+        except csv.Error:
+            return list(csv.reader(text.splitlines()))[:limit]
+    return [[line] for line in text.splitlines()[:limit]]

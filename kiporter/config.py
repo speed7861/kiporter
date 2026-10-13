@@ -119,6 +119,7 @@ class Settings:
     bom_include_dnp: bool = False
     bom_export_cpl: bool = True
     fab_profile: str = "JLCPCB"
+    custom_fab_profiles: list = field(default_factory=list)
     # ---- misc
     first_run_done: bool = False
     last_project: str = ""

@@ -37,7 +37,7 @@ def _is_secret(key: str) -> bool:
 
 # ==================================================================== suppliers
 class SuppliersPanel(ttk.Notebook):
-    """One page per supplier: use-in-search switch, credentials, test button and directions."""
+    """One page per supplier: use-in-search switch, credentials (Enter saves + checks them) and directions."""
 
     def __init__(self, parent, app: "App", focus: str | None = None):
         super().__init__(parent)
@@ -45,6 +45,7 @@ class SuppliersPanel(ttk.Notebook):
         self.vars: dict[str, tk.StringVar] = {}
         self.enabled: dict[str, tk.BooleanVar] = {}
         self.status: dict[str, tk.StringVar] = {}
+        self.status_labels: dict[str, ttk.Label] = {}
         s = app.settings
         for name, flds in SUPPLIER_FIELDS.items():
             prov = app.providers[name]
@@ -57,8 +58,9 @@ class SuppliersPanel(ttk.Notebook):
             ttk.Checkbutton(top, text=f"Search {name}", variable=ev).pack(side="left")
             st = tk.StringVar()
             self.status[name] = st
-            ttk.Label(top, textvariable=st, foreground="#0b6e4f").pack(side="left", padx=12)
-            ttk.Button(top, text="Test connection", command=lambda n=name: self.test(n)).pack(side="right")
+            lab = ttk.Label(top, textvariable=st)
+            lab.pack(side="left", padx=12)
+            self.status_labels[name] = lab
             g = guides.GUIDES.get(name, {})
             if g.get("portal"):
                 ttk.Button(top, text="Open sign-in page…",
@@ -71,9 +73,16 @@ class SuppliersPanel(ttk.Notebook):
                 self.vars[key] = v
                 e = ttk.Entry(grid, textvariable=v, width=56, show="•" if _is_secret(key) else "")
                 e.grid(row=r, column=1, sticky="ew", pady=2)
+                e.bind("<Return>", lambda ev, n=name: self.enter(n))
+                v.trace_add("write", lambda *a, n=name: self._typed(n))
                 if _is_secret(key):
-                    ttk.Checkbutton(grid, text="show", command=lambda e=e: e.configure(
-                        show="" if e.cget("show") else "•")).grid(row=r, column=2, padx=4)
+                    sv = tk.BooleanVar(value=False)
+                    ttk.Checkbutton(grid, text="show", variable=sv, command=lambda e=e, sv=sv: e.configure(
+                        show="" if sv.get() else "•")).grid(row=r, column=2, padx=4)
+            if flds:
+                ttk.Button(grid, text="Enter", style="Accent.TButton", width=10,
+                           command=lambda n=name: self.enter(n)).grid(row=0, column=3, rowspan=max(len(flds), 1),
+                                                                      sticky="ns", padx=(8, 0), pady=2)
             grid.columnconfigure(1, weight=1)
             ttk.Label(page, text="How to get the key", style="Bold.TLabel").pack(anchor="w")
             txt = ui.scrolled_text(page, height=9, wrap="word", relief="flat", font=ui.FONTS.get("normal"))
@@ -90,11 +99,30 @@ class SuppliersPanel(ttk.Notebook):
                 else "Keys are stored in the Kiporter settings file.")
         self.note = note
 
+    def _set_status(self, name: str, text: str, style: str) -> None:
+        self.status[name].set(text)
+        self.status_labels[name].configure(style=style)
+
+    def _keys_filled(self, name: str) -> bool:
+        prov = self.app.providers[name]
+        return all(self.vars[k].get().strip() for k in prov.key_fields)
+
     def refresh_status(self) -> None:
-        for name, st in self.status.items():
+        for name in self.status:
             prov = self.app.providers[name]
-            st.set("✔ No account needed" if not prov.key_fields else
-                   "✔ Connected" if prov.configured else "Not connected")
+            if not prov.key_fields:
+                self._set_status(name, "✔ No account needed", "Good.TLabel")
+            elif prov.configured and self._keys_filled(name):
+                self._set_status(name, "✔ Connected", "Good.TLabel")
+            else:
+                self._set_status(name, "Not connected", "Bad.TLabel")
+
+    def _typed(self, name: str) -> None:
+        """Live status while typing: red until every key field is filled."""
+        if not self._keys_filled(name):
+            self._set_status(name, "Not connected", "Bad.TLabel")
+        else:
+            self._set_status(name, "Press Enter to save and check the key", "Busy.TLabel")
 
     def apply(self) -> None:
         s = self.app.settings
@@ -109,13 +137,19 @@ class SuppliersPanel(ttk.Notebook):
                 prov.reset()
         self.refresh_status()
 
-    def test(self, name: str) -> None:
+    def enter(self, name: str) -> None:
+        """Save the key(s), update the Search tab straight away, then check them with the supplier."""
         self.apply()
         self.app.settings.save()
-        self.status[name].set("Testing…")
+        self.app.apply_settings()
+        if not self._keys_filled(name):
+            self._set_status(name, "Not connected", "Bad.TLabel")
+            return
+        self._set_status(name, "Checking the key…", "Busy.TLabel")
         prov = self.app.providers[name]
-        self.app.run_bg(prov.test, lambda msg: self.status[name].set("✔ " + msg),
-                        lambda e: self.status[name].set("✖ " + str(e)[:140]))
+        self.app.run_bg(prov.test,
+                        lambda msg: self._set_status(name, "✔ Connected — " + msg, "Good.TLabel"),
+                        lambda e: self._set_status(name, "✖ Key not accepted: " + str(e)[:120], "Bad.TLabel"))
 
 
 class AccountsDialog(tk.Toplevel):
@@ -342,7 +376,7 @@ class SettingsTab(ttk.Frame):
         self.row(p, "bom_include_dnp", "Include Do-Not-Populate parts in exports", "bool")
         self.row(p, "bom_export_cpl", "Also write the pick-and-place (CPL) file for assembly houses", "bool")
         from . import fab
-        self.row(p, "fab_profile", "Board house for the Fabrication tab", "choice", fab.PROFILE_NAMES)
+        self.row(p, "fab_profile", "Board house for the Fabrication tab", "choice", [p.name for p in fab.all_profiles(self.app.settings)])
 
     def _page_about(self) -> None:
         p = self._page("About")

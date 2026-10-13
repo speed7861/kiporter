@@ -23,53 +23,160 @@ Log = Callable[[str], None]
 
 BASE_LAYERS = ["F.Cu", "B.Cu", "F.Paste", "B.Paste", "F.Silkscreen", "B.Silkscreen", "F.Mask", "B.Mask",
                "Edge.Cuts"]
+INNER = "In*.Cu"  # placeholder: every inner copper layer the board has
+# every layer a custom profile can choose from (in plotting order)
+ALL_LAYERS = ["F.Cu", INNER, "B.Cu", "F.Paste", "B.Paste", "F.Silkscreen", "B.Silkscreen", "F.Mask", "B.Mask",
+              "Edge.Cuts", "F.Fab", "B.Fab", "F.Courtyard", "B.Courtyard", "User.Drawings", "User.Comments",
+              "User.Eco1", "User.Eco2", "Margin", "User.1", "User.2"]
+DEFAULT_LAYERS = ["F.Cu", INNER, "B.Cu", "F.Paste", "B.Paste", "F.Silkscreen", "B.Silkscreen", "F.Mask", "B.Mask",
+                  "Edge.Cuts"]
+
+# Every option a profile can set. Built-in profiles override a few; custom profiles store all of them.
+DEFAULT_OPTIONS: dict = {
+    "layers": DEFAULT_LAYERS,
+    "board_plot_params": False,  # use the plot settings saved in the board instead of the options below
+    "protel_ext": True,  # .gtl/.gbl/... file names (off = KiCad's .gbr names)
+    "x2": True,  # Gerber X2 attributes
+    "netlist": True,  # netlist attributes (X2 only)
+    "subtract_soldermask": False,
+    "disable_aperture_macros": False,
+    "use_drill_origin": False,
+    "precision": 6,
+    "exclude_refdes": False,
+    "exclude_value": False,
+    "drill_format": "excellon",  # excellon | gerber
+    "drill_units": "mm",  # mm | in
+    "drill_zeros": "decimal",  # decimal | suppressleading | suppresstrailing | keep
+    "drill_origin": "absolute",  # absolute | plot
+    "drill_oval": "alternate",  # alternate | route
+    "drill_separate_th": False,  # separate PTH / NPTH files
+    "drill_map": "gerberx2",  # none | pdf | gerberx2 | svg | dxf | ps
+    "bom_format": "Generic (all fields)",
+    "notes": "",
+    "url": "",
+}
 
 
 @dataclass
 class FabProfile:
     name: str
-    bom_format: str | None  # name in bom.FORMATS
-    gerber_flags: list[str] = field(default_factory=list)
-    drill_flags: list[str] = field(default_factory=list)
-    extra_layers: list[str] = field(default_factory=list)
-    notes: str = ""
-    url: str = ""
+    options: dict = field(default_factory=dict)
+    custom: bool = False
 
+    def opt(self, key: str):
+        return self.options.get(key, DEFAULT_OPTIONS[key])
 
-_DRILL_MM = ["--format", "excellon", "--excellon-units", "mm", "--excellon-zeros-format", "decimal",
-             "--drill-origin", "absolute", "--excellon-oval-format", "alternate"]
+    @property
+    def bom_format(self) -> str | None:
+        return self.opt("bom_format") or None
+
+    @property
+    def notes(self) -> str:
+        return self.opt("notes")
+
+    @property
+    def url(self) -> str:
+        return self.opt("url")
+
+    def layers(self, pcb_text: str) -> list[str]:
+        out: list[str] = []
+        for l in self.opt("layers"):
+            out += inner_layers(pcb_text) if l == INNER else [l]
+        return list(dict.fromkeys(out))
+
+    @property
+    def gerber_flags(self) -> list[str]:
+        if self.opt("board_plot_params"):
+            return ["--board-plot-params"]
+        f = []
+        if not self.opt("protel_ext"):
+            f.append("--no-protel-ext")
+        if not self.opt("x2"):
+            f.append("--no-x2")
+        if not self.opt("netlist"):
+            f.append("--no-netlist")
+        if self.opt("subtract_soldermask"):
+            f.append("--subtract-soldermask")
+        if self.opt("disable_aperture_macros"):
+            f.append("--disable-aperture-macros")
+        if self.opt("use_drill_origin"):
+            f.append("--use-drill-file-origin")
+        if self.opt("exclude_refdes"):
+            f.append("--exclude-refdes")
+        if self.opt("exclude_value"):
+            f.append("--exclude-value")
+        return f + ["--precision", str(self.opt("precision"))]
+
+    @property
+    def drill_flags(self) -> list[str]:
+        f = ["--format", self.opt("drill_format"), "--drill-origin", self.opt("drill_origin")]
+        if self.opt("drill_format") == "excellon":
+            f += ["--excellon-units", self.opt("drill_units"), "--excellon-zeros-format", self.opt("drill_zeros"),
+                  "--excellon-oval-format", self.opt("drill_oval")]
+            if self.opt("drill_separate_th"):
+                f.append("--excellon-separate-th")
+        if self.opt("drill_map") != "none":
+            f += ["--generate-map", "--map-format", self.opt("drill_map")]
+        return f
+
 
 PROFILES: list[FabProfile] = [
-    FabProfile("JLCPCB", "JLCPCB", ["--no-x2", "--subtract-soldermask"],
-               _DRILL_MM + ["--generate-map", "--map-format", "gerberx2"],
-               notes="Upload the Gerber zip on jlcpcb.com. For assembly, upload the BOM and the CPL file from the "
-                     "Gerbers folder in the assembly step and check part rotations in the preview.",
-               url="https://jlcpcb.com/quote"),
-    FabProfile("PCBWay", "PCBWay", ["--no-x2"], _DRILL_MM + ["--generate-map", "--map-format", "gerberx2"],
-               notes="Upload the Gerber zip; for assembly add the BOM (.xlsx preferred) and the placement file.",
-               url="https://www.pcbway.com/orderonline.aspx"),
-    FabProfile("OSH Park", None, [], ["--format", "excellon", "--excellon-units", "in",
-                                      "--excellon-zeros-format", "decimal", "--drill-origin", "absolute"],
-               notes="Upload the Gerber zip (OSH Park also accepts the .kicad_pcb directly). No assembly service.",
-               url="https://oshpark.com/"),
-    FabProfile("ALLPCB", "ALLPCB", ["--no-x2"], _DRILL_MM + ["--generate-map", "--map-format", "gerberx2"],
-               url="https://www.allpcb.com/"),
-    FabProfile("Seeed Fusion", "Seeed Fusion", ["--no-x2"], _DRILL_MM, url="https://www.seeedstudio.com/fusion_pcb.html"),
-    FabProfile("NextPCB", "NextPCB", ["--no-x2"], _DRILL_MM + ["--generate-map", "--map-format", "gerberx2"],
-               url="https://www.nextpcb.com/"),
-    FabProfile("Eurocircuits", "Eurocircuits", [], _DRILL_MM + ["--generate-map", "--map-format", "gerberx2"],
-               notes="Eurocircuits reads Gerber X2 attributes, so X2 is kept on.", url="https://www.eurocircuits.com/"),
-    FabProfile("Aisler", "Aisler", [], _DRILL_MM, notes="Aisler also accepts the KiCad project directly.",
-               url="https://aisler.net/"),
-    FabProfile("MacroFab", "MacroFab", [], _DRILL_MM, url="https://macrofab.com/"),
-    FabProfile("Generic (KiCad defaults)", "Generic (all fields)", [],
-               _DRILL_MM + ["--generate-map", "--map-format", "pdf"]),
+    FabProfile("JLCPCB", {"x2": False, "subtract_soldermask": True, "bom_format": "JLCPCB",
+                          "notes": "Upload the Gerber zip on jlcpcb.com. For assembly, upload the BOM and the CPL file "
+                                   "from the Gerbers folder in the assembly step and check part rotations in the "
+                                   "preview.", "url": "https://jlcpcb.com/quote"}),
+    FabProfile("PCBWay", {"x2": False, "bom_format": "PCBWay",
+                          "notes": "Upload the Gerber zip; for assembly add the BOM (.xlsx preferred) and the "
+                                   "placement file.", "url": "https://www.pcbway.com/orderonline.aspx"}),
+    FabProfile("OSH Park", {"drill_units": "in", "drill_map": "none", "bom_format": None,
+                            "notes": "Upload the Gerber zip (OSH Park also accepts the .kicad_pcb directly). "
+                                     "No assembly service.", "url": "https://oshpark.com/"}),
+    FabProfile("ALLPCB", {"x2": False, "bom_format": "ALLPCB", "url": "https://www.allpcb.com/"}),
+    FabProfile("Seeed Fusion", {"x2": False, "drill_map": "none", "bom_format": "Seeed Fusion",
+                                "url": "https://www.seeedstudio.com/fusion_pcb.html"}),
+    FabProfile("NextPCB", {"x2": False, "bom_format": "NextPCB", "url": "https://www.nextpcb.com/"}),
+    FabProfile("Eurocircuits", {"bom_format": "Eurocircuits",
+                                "notes": "Eurocircuits reads Gerber X2 attributes, so X2 is kept on.",
+                                "url": "https://www.eurocircuits.com/"}),
+    FabProfile("Aisler", {"drill_map": "none", "bom_format": "Aisler",
+                          "notes": "Aisler also accepts the KiCad project directly.", "url": "https://aisler.net/"}),
+    FabProfile("MacroFab", {"drill_map": "none", "bom_format": "MacroFab", "url": "https://macrofab.com/"}),
+    FabProfile("Generic (KiCad defaults)", {"drill_map": "pdf"}),
+    FabProfile("Use the board's own plot settings", {
+        "board_plot_params": True, "drill_map": "pdf",
+        "notes": "Plots exactly what is set in KiCad's PCB Editor → File → Plot dialog (layers and "
+                 "options saved in the board)."}),
 ]
 PROFILE_NAMES = [p.name for p in PROFILES]
 
 
-def get_profile(name: str) -> FabProfile:
-    return next((p for p in PROFILES if p.name == name), PROFILES[0])
+def custom_profiles(settings: Settings | None) -> list[FabProfile]:
+    out = []
+    for d in (settings.custom_fab_profiles if settings else []) or []:
+        if d.get("name"):
+            out.append(FabProfile(d["name"], {k: v for k, v in d.items() if k in DEFAULT_OPTIONS}, custom=True))
+    return out
+
+
+def all_profiles(settings: Settings | None) -> list[FabProfile]:
+    custom = custom_profiles(settings)
+    names = {c.name for c in custom}
+    return [p for p in PROFILES if p.name not in names] + custom
+
+
+def get_profile(name: str, settings: Settings | None = None) -> FabProfile:
+    return next((p for p in all_profiles(settings) if p.name == name), PROFILES[0])
+
+
+def save_custom_profile(settings: Settings, name: str, options: dict) -> None:
+    rest = [d for d in settings.custom_fab_profiles if d.get("name") != name]
+    settings.custom_fab_profiles = rest + [{"name": name, **{k: options.get(k, v) for k, v in DEFAULT_OPTIONS.items()}}]
+    settings.save()
+
+
+def delete_custom_profile(settings: Settings, name: str) -> None:
+    settings.custom_fab_profiles = [d for d in settings.custom_fab_profiles if d.get("name") != name]
+    settings.save()
 
 
 @dataclass
@@ -132,7 +239,7 @@ def make_zip(gerber_dir: Path, zip_path: Path, include_assembly: bool = False) -
 
 def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: FabOptions,
              log: Log = print) -> FabResult:
-    prof = get_profile(opts.profile)
+    prof = get_profile(opts.profile, settings)
     name = project_file.stem
     build = build_dir_for(project_file)
     gdir = build / "Gerbers"
@@ -194,13 +301,14 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
 
         if work_pcb and (opts.gerbers or opts.drill or opts.placement):
             text = work_pcb.read_text(encoding="utf-8", errors="replace")
-            layers = BASE_LAYERS[:2] + inner_layers(text) + BASE_LAYERS[2:] + prof.extra_layers
+            layers = prof.layers(text)
 
             # 4) Gerbers
             if opts.gerbers:
                 log(f"Plotting Gerbers for {prof.name} ({len(layers)} layers)…")
-                r = _run(ki, "pcb", "export", "gerbers", work_pcb, "-o", gdir, "--layers", ",".join(layers),
-                         "--check-zones", *prof.gerber_flags)
+                layer_args = [] if prof.opt("board_plot_params") else ["--layers", ",".join(layers)]
+                r = _run(ki, "pcb", "export", "gerbers", work_pcb, "-o", gdir, *layer_args, "--check-zones",
+                         *prof.gerber_flags)
                 if r.returncode != 0:
                     res.warnings.append(f"Gerber export failed: {(r.stderr or r.stdout).strip()[:300]}")
             # 5) drill

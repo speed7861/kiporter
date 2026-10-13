@@ -52,6 +52,10 @@ def setup(root: tk.Tk, settings) -> None:
     style.configure("Title.TLabel", font=FONTS["title"])
     style.configure("Bold.TLabel", font=FONTS["bold"])
     style.configure("Muted.TLabel", foreground="#666666")
+    style.configure("Good.TLabel", foreground="#0b6e4f", font=FONTS["bold"])
+    style.configure("Bad.TLabel", foreground="#b3261e", font=FONTS["bold"])
+    style.configure("Busy.TLabel", foreground="#8a6d00")
+    style.configure("Disconnected.TCheckbutton", foreground="#b3261e")
     style.configure("Treeview", rowheight=int(size * 2.2))
     icon = load_logo(64)
     if icon is not None:

@@ -571,7 +571,10 @@ class App(tk.Tk):
     def _refresh_source_labels(self) -> None:
         for name, cb in self.source_checks.items():
             prov = self.providers[name]
-            cb.configure(text=name if prov.configured or not prov.key_fields else f"{name} (connect)")
+            if prov.configured or not prov.key_fields:
+                cb.configure(text=name, style="TCheckbutton")
+            else:  # red until an API key is entered (Settings -> Suppliers)
+                cb.configure(text=f"{name} (not connected)", style="Disconnected.TCheckbutton")
 
     def _sources_changed(self) -> None:
         for name, flag in providers.ENABLE_FLAGS.items():
@@ -681,6 +684,8 @@ class App(tk.Tk):
             return
         if self.tree.exists(iid):
             self.tree.set(iid, "cad", cad.label(self.results[iid]))
+            if iid in self.tree.selection():  # update the "checking..." line in the details
+                self._show_details(self.results[iid])
         if not self._resort_pending:  # batch re-sorting/filtering while results stream in
             self._resort_pending = True
             self.after(400, self._deferred_resort)
@@ -817,23 +822,48 @@ class App(tk.Tk):
                     lambda png: token == self._preview_token and self.preview.set_3d(png),
                     lambda e: token == self._preview_token and self.preview.set_3d(None, f"3D preview: {e}"))
 
+    @staticmethod
+    def _cad_text(r: PartResult) -> tuple[str, str | None]:
+        if r.cad is None:
+            return "checking…", "muted"
+        s, f, m = r.cad
+        marks = "   ".join(("✔ " if ok else "✖ ") + n for n, ok in
+                           (("Symbol", s), ("Footprint", f), ("3D model", m)))
+        src = f"   (free EasyEDA model, LCSC {r.cad_lcsc})" if r.cad_lcsc and (s or f) else \
+            "   (none at LCSC - use 'Find CAD elsewhere')" if not (s or f) else ""
+        return marks + src, "good" if s and f else "bad"
+
+    @staticmethod
+    def _spec_rows(text: str) -> list[tuple]:
+        rows = []
+        for part in (text or "").split(";"):
+            k, sep, v = part.partition(":")
+            k, v = k.strip(), v.strip()
+            if sep and k and v and v not in ("-", "~", "N/A"):
+                rows.append((k, v))
+        return rows
+
     def _show_details(self, r: PartResult) -> None:
         names = fields.field_names(self.settings.field_names)
         data = r.part_data()
-        lines = [r.mpn, r.manufacturer, "", r.description, ""]
-        for k, v in (("Source", r.source), ("Supplier PN", r.supplier_pn), ("In stock", r.stock_str),
-                     ("Lead time", r.lead_str), ("Price (1 pc)", r.price_str), ("MOQ", r.moq),
-                     ("Package", r.package), ("CAD models", cad.label(r) + (f" (EasyEDA {r.cad_lcsc})"
-                                                                         if r.cad_lcsc else "")),
-                     ("Category", r.category), ("Lifecycle", r.lifecycle), ("Datasheet", r.datasheet)):
-            if v not in ("", None):
-                lines.append(f"{k}: {v}")
-        for k, v in r.extra.items():
-            if v:
-                lines.append(f"{k}: {v}")
-        lines += ["", "Symbol fields written on import:"]
-        lines += [f"   {names[k]} = {data[k][:60]}" for k in fields.FIELD_ORDER if k in data]
-        self.preview.set_details(lines)
+        stock_style = "good" if r.stock else "bad"
+        price = f"{r.price_str} each" + (f"  (min. order {r.moq})" if r.moq and r.moq > 1 else "") if r.price_str else ""
+        host = r.url.split("/")[2] if r.url.count("/") >= 2 else r.url
+        cad_txt, cad_style = self._cad_text(r)
+        buy = [("Supplier", r.source), ("Supplier part #", r.supplier_pn),
+               ("In stock", (r.stock_str or "0") if r.stock is not None else "", stock_style),
+               ("Lead time", r.lead_str), ("Unit price", price), ("Lifecycle", r.lifecycle),
+               ("JLCPCB library", r.extra.get("JLCPCB library", ""))]
+        part = [("Package", r.package), ("Category", r.category), ("CAD models", cad_txt, cad_style),
+                ("Datasheet", "Open datasheet" if r.datasheet else "", ("link", r.datasheet)),
+                ("Product page", f"Open on {host}" if r.url else "", ("link", r.url))]
+        specs = self._spec_rows(r.extra.get("Attributes", ""))
+        notes = [(k, v) for k, v in r.extra.items() if k not in ("Attributes", "JLCPCB library", "Detailed") and v]
+        imported = [(names[k], data[k]) for k in fields.FIELD_ORDER if k in data]
+        desc = r.extra.get("Detailed") or r.description
+        self.preview.set_rich(r.mpn, r.manufacturer, desc,
+                              [("Buying", buy), ("Part", part), ("Specifications", specs), ("Notes", notes),
+                               ("Fields added to the symbol on import", imported)])
 
     def _open_selected(self, attr: str) -> None:
         r = self.selected_part()

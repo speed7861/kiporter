@@ -35,10 +35,11 @@ class FabTab(ttk.Frame):
         row = ttk.Frame(self)
         row.pack(fill="x")
         ttk.Label(row, text="Board house:").pack(side="left")
-        self.profile = ttk.Combobox(row, state="readonly", width=28, values=fab.PROFILE_NAMES)
-        self.profile.set(s.fab_profile if s.fab_profile in fab.PROFILE_NAMES else fab.PROFILE_NAMES[0])
+        self.profile = ttk.Combobox(row, state="readonly", width=34)
+        self._fill_profiles(s.fab_profile)
         self.profile.pack(side="left", padx=6)
         self.profile.bind("<<ComboboxSelected>>", lambda e: self._profile_changed())
+        ttk.Button(row, text="Custom Gerber setup…", command=self.edit_profile).pack(side="left", padx=4)
         ttk.Button(row, text="Open order page", command=self._open_shop).pack(side="left", padx=4)
         ttk.Label(row, text="   Boards:").pack(side="left")
         self.boards = tk.IntVar(value=s.bom_boards or 1)
@@ -74,20 +75,32 @@ class FabTab(ttk.Frame):
         self._profile_changed()
 
     # ---------------------------------------------------------------- helpers
+    def _fill_profiles(self, select: str) -> None:
+        profs = fab.all_profiles(self.app.settings)
+        self.profile["values"] = [p.name + ("  (custom)" if p.custom else "") for p in profs]
+        names = [p.name for p in profs]
+        self.profile.current(names.index(select) if select in names else 0)
+
+    def _profile_name(self) -> str:
+        return self.profile.get().replace("  (custom)", "")
+
+    def edit_profile(self) -> None:
+        FabProfileEditor(self, self._profile_name())
+
     def refresh(self) -> None:
         p = self.app.current_project()
         self.project_info.set(f"Project: {p.pro_file}   →   output: {fab.build_dir_for(p.pro_file)}" if p
                               else "Select a project at the top of the window.")
 
     def _profile_changed(self) -> None:
-        prof = fab.get_profile(self.profile.get())
+        prof = fab.get_profile(self._profile_name(), self.app.settings)
         self.notes.set(prof.notes or "")
         self.app.settings.fab_profile = prof.name
         self.app.settings.save()
         self.refresh()
 
     def _open_shop(self) -> None:
-        prof = fab.get_profile(self.profile.get())
+        prof = fab.get_profile(self._profile_name(), self.app.settings)
         if prof.url:
             webbrowser.open(prof.url)
 
@@ -113,7 +126,7 @@ class FabTab(ttk.Frame):
         if not self.app.ki.cli:
             messagebox.showerror(APP_TITLE, "kicad-cli was not found (Settings → KiCad).")
             return
-        opts = fab.FabOptions(profile=self.profile.get(), boards=max(int(self.boards.get() or 1), 1),
+        opts = fab.FabOptions(profile=self._profile_name(), boards=max(int(self.boards.get() or 1), 1),
                               file_type=self.ftype.get(), **{k: v.get() for k, v in self.steps.items()})
         self.go_btn.state(["disabled"])
         self.busy.set("Working…")
@@ -153,8 +166,157 @@ class FabTab(ttk.Frame):
         if not gdir.exists() or not any(gdir.iterdir()):
             messagebox.showinfo(APP_TITLE, "Generate the Gerbers first.")
             return
-        prof = fab.get_profile(self.profile.get())
+        prof = fab.get_profile(self._profile_name(), self.app.settings)
         z = fab.make_zip(gdir, fab.build_dir_for(p.pro_file) / f"{p.pro_file.stem}-Gerbers-"
                          f"{prof.name.split()[0]}.zip")
         self.app.log(f"Created {z}")
         kicad_control.open_path(z.parent)
+
+
+class FabProfileEditor(tk.Toplevel):
+    """Create / edit a custom Gerber + drill + BOM configuration."""
+
+    GERBER_BOOLS = [("board_plot_params", "Use the plot settings saved in the board (ignores the options below)"),
+                    ("protel_ext", "Protel file extensions (.gtl, .gbl, .gts, …)"),
+                    ("x2", "Gerber X2 format (extended attributes)"),
+                    ("netlist", "Include netlist attributes (X2)"),
+                    ("subtract_soldermask", "Subtract soldermask from silkscreen"),
+                    ("disable_aperture_macros", "Disable aperture macros"),
+                    ("use_drill_origin", "Use the drill/place file origin"),
+                    ("exclude_refdes", "Leave out reference designators"),
+                    ("exclude_value", "Leave out values")]
+    DRILL_CHOICES = [("drill_format", "Drill file format", ["excellon", "gerber"]),
+                     ("drill_units", "Units (Excellon)", ["mm", "in"]),
+                     ("drill_zeros", "Zeros (Excellon)", ["decimal", "suppressleading", "suppresstrailing", "keep"]),
+                     ("drill_origin", "Drill origin", ["absolute", "plot"]),
+                     ("drill_oval", "Oval holes", ["alternate", "route"]),
+                     ("drill_map", "Drill map", ["none", "gerberx2", "pdf", "svg", "dxf", "ps"])]
+
+    def __init__(self, tab: FabTab, start_from: str):
+        super().__init__(tab.app)
+        from . import bom
+        self.tab = tab
+        self.app = tab.app
+        self.title("Custom Gerber setup")
+        self.transient(self.app)
+        self.vars: dict[str, tk.Variable] = {}
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        top = ttk.Frame(frm)
+        top.pack(fill="x")
+        ttk.Label(top, text="Name:").pack(side="left")
+        self.name = tk.StringVar()
+        ttk.Entry(top, textvariable=self.name, width=30).pack(side="left", padx=6)
+        ttk.Label(top, text="Start from:").pack(side="left", padx=(12, 0))
+        self.base = ttk.Combobox(top, state="readonly", width=32,
+                                 values=[p.name for p in fab.all_profiles(self.app.settings)])
+        self.base.pack(side="left", padx=6)
+        self.base.bind("<<ComboboxSelected>>", lambda e: self.load(self.base.get()))
+
+        cols = ttk.Frame(frm)
+        cols.pack(fill="both", expand=True, pady=8)
+        lay = ttk.LabelFrame(cols, text="Layers to plot", padding=8)
+        lay.pack(side="left", fill="y", padx=(0, 8))
+        self.layer_vars: dict[str, tk.BooleanVar] = {}
+        for i, layer in enumerate(fab.ALL_LAYERS):
+            v = tk.BooleanVar()
+            self.layer_vars[layer] = v
+            text = "All inner copper (In1.Cu …)" if layer == fab.INNER else layer
+            ttk.Checkbutton(lay, text=text, variable=v).grid(row=i % 11, column=i // 11, sticky="w", padx=4)
+        right = ttk.Frame(cols)
+        right.pack(side="left", fill="both", expand=True)
+        gb = ttk.LabelFrame(right, text="Gerber options", padding=8)
+        gb.pack(fill="x")
+        for key, label in self.GERBER_BOOLS:
+            v = tk.BooleanVar()
+            self.vars[key] = v
+            ttk.Checkbutton(gb, text=label, variable=v).pack(anchor="w")
+        pr = ttk.Frame(gb)
+        pr.pack(anchor="w", pady=(4, 0))
+        ttk.Label(pr, text="Coordinate precision:").pack(side="left")
+        self.vars["precision"] = tk.StringVar()
+        ttk.Combobox(pr, textvariable=self.vars["precision"], values=["5", "6"], width=4, state="readonly").pack(
+            side="left", padx=6)
+        db = ttk.LabelFrame(right, text="Drill files", padding=8)
+        db.pack(fill="x", pady=8)
+        for r, (key, label, choices) in enumerate(self.DRILL_CHOICES):
+            ttk.Label(db, text=label).grid(row=r, column=0, sticky="w", padx=(0, 8), pady=1)
+            v = tk.StringVar()
+            self.vars[key] = v
+            ttk.Combobox(db, textvariable=v, values=choices, state="readonly", width=18).grid(
+                row=r, column=1, sticky="w")
+        v = tk.BooleanVar()
+        self.vars["drill_separate_th"] = v
+        ttk.Checkbutton(db, text="Separate files for plated (PTH) and non-plated (NPTH) holes", variable=v).grid(
+            row=len(self.DRILL_CHOICES), column=0, columnspan=2, sticky="w")
+        ob = ttk.LabelFrame(right, text="BOM and notes", padding=8)
+        ob.pack(fill="x")
+        ttk.Label(ob, text="BOM format").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.vars["bom_format"] = tk.StringVar()
+        ttk.Combobox(ob, textvariable=self.vars["bom_format"], values=["(none)"] + bom.FORMAT_NAMES,
+                     state="readonly", width=30).grid(row=0, column=1, sticky="w")
+        for r, (key, label) in enumerate((("notes", "Notes shown in the tab"), ("url", "Order page URL")), start=1):
+            ttk.Label(ob, text=label).grid(row=r, column=0, sticky="w", padx=(0, 8), pady=1)
+            self.vars[key] = tk.StringVar()
+            ttk.Entry(ob, textvariable=self.vars[key], width=50).grid(row=r, column=1, sticky="ew")
+
+        bf = ttk.Frame(frm)
+        bf.pack(fill="x")
+        self.del_btn = ttk.Button(bf, text="Delete", command=self.delete)
+        self.del_btn.pack(side="left")
+        ttk.Button(bf, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(bf, text="Save", command=self.save, style="Accent.TButton").pack(side="right", padx=6)
+        self.load(start_from)
+        self.grab_set()
+
+    def load(self, name: str) -> None:
+        prof = fab.get_profile(name, self.app.settings)
+        self.base.set(prof.name)
+        self.name.set(prof.name if prof.custom else f"My {prof.name}")
+        layers = prof.opt("layers")
+        for layer, v in self.layer_vars.items():
+            v.set(layer in layers)
+        for key, v in self.vars.items():
+            val = prof.opt(key)
+            if key == "bom_format":
+                v.set(val or "(none)")
+            elif isinstance(v, tk.BooleanVar):
+                v.set(bool(val))
+            else:
+                v.set(str(val))
+        self.del_btn.state(["!disabled"] if prof.custom else ["disabled"])
+
+    def save(self) -> None:
+        name = self.name.get().strip()
+        if not name:
+            messagebox.showwarning(APP_TITLE, "Give the setup a name.", parent=self)
+            return
+        if name in fab.PROFILE_NAMES:
+            messagebox.showwarning(APP_TITLE, f"'{name}' is a built-in setup - pick another name.", parent=self)
+            return
+        layers = [layer for layer in fab.ALL_LAYERS if self.layer_vars[layer].get()]
+        if not layers and not self.vars["board_plot_params"].get():
+            messagebox.showwarning(APP_TITLE, "Select at least one layer.", parent=self)
+            return
+        opts: dict = {"layers": layers}
+        for key, v in self.vars.items():
+            val = v.get()
+            if key == "bom_format":
+                val = None if val == "(none)" else val
+            elif key == "precision":
+                val = int(val)
+            opts[key] = val
+        fab.save_custom_profile(self.app.settings, name, opts)
+        self.app.log(f"Saved custom Gerber setup '{name}'")
+        self.tab._fill_profiles(name)
+        self.tab._profile_changed()
+        self.destroy()
+
+    def delete(self) -> None:
+        name = self.base.get()
+        if messagebox.askyesno(APP_TITLE, f"Delete the custom setup '{name}'?", parent=self):
+            fab.delete_custom_profile(self.app.settings, name)
+            self.tab._fill_profiles(self.app.settings.fab_profile)
+            self.tab._profile_changed()
+            self.destroy()

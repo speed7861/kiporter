@@ -32,7 +32,7 @@ GUIDES: dict[str, dict] = {
             "Under 'API Products' tick 'ProductInformation V4', then click 'Add Production App'.",
             "Open the new app and copy the 'Client ID' and 'Client Secret'.",
             "In Kiporter: Settings -> Suppliers -> Digi-Key, paste both values, choose your locale site "
-            "(US, CA, UK, DE, ...) and currency, then click 'Test connection'.",
+            "(US, CA, UK, DE, ...) and currency, then press Enter.",
         ],
         "limits": "Free tier: about 1,000 searches per day and 120 per minute.",
     },
@@ -45,7 +45,7 @@ GUIDES: dict[str, dict] = {
             "Fill in the short form and accept the terms. The Search API key is shown on screen and e-mailed "
             "to you. You can find it again under My Account -> 'APIs'.",
             "Make sure you copy the SEARCH API key (not the Cart or Order API key).",
-            "In Kiporter: Settings -> Suppliers -> Mouser, paste the key and click 'Test connection'.",
+            "In Kiporter: Settings -> Suppliers -> Mouser, paste the key and press Enter.",
         ],
         "limits": "Free: 30 searches per minute, 1,000 per day. The BOM check paces itself to stay under this.",
     },
@@ -60,7 +60,7 @@ GUIDES: dict[str, dict] = {
             "In Kiporter: Settings -> Suppliers -> Farnell/Newark, paste the key and pick your store: "
             "www.newark.com (US), canada.newark.com, uk.farnell.com, de.farnell.com, au.element14.com, "
             "sg.element14.com, in.element14.com, ...",
-            "Click 'Test connection'.",
+            "Press Enter to save and check it.",
         ],
         "limits": "Free: about 2 calls per second and 1,000 per day.",
     },
@@ -72,7 +72,7 @@ GUIDES: dict[str, dict] = {
             "Open 'My applications' and add a new application named 'Kiporter'.",
             "Copy the application's private Token and its Application secret.",
             "In Kiporter: Settings -> Suppliers -> TME, paste both, set your country code (US, PL, DE, ...) "
-            "and currency, then click 'Test connection'.",
+            "and currency, then press Enter.",
         ],
         "limits": "Fair-use limits apply (a few requests per second).",
     },
@@ -83,7 +83,7 @@ GUIDES: dict[str, dict] = {
             "Sign up at portal.nexar.com (you can sign in with Google or GitHub).",
             "Create a new App and enable the 'Supply' scope (Design & Supply).",
             "Open the app's 'Authorization' tab and copy the Client ID and Client Secret.",
-            "In Kiporter: Settings -> Suppliers -> Octopart, paste both and click 'Test connection'.",
+            "In Kiporter: Settings -> Suppliers -> Octopart, paste both and press Enter.",
             "Octopart sums the stock of every distributor, which is handy for spotting parts nobody has.",
         ],
         "limits": "Free plan: a limited number of matched parts per month; pricing data may need a paid plan.",

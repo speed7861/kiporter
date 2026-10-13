@@ -65,6 +65,60 @@ class PreviewPane(ttk.Notebook):
             d.tag_configure("title", font=ui.FONTS.get("title"))
         d.configure(state="disabled")
 
+    def set_rich(self, title: str, subtitle: str, description: str,
+                 sections: list[tuple[str, list[tuple]]]) -> None:
+        """Readable part sheet: title, description, then labelled rows grouped under headings.
+
+        A row is (label, value) or (label, value, style) with style 'good', 'bad', 'muted' or
+        ('link', url) - links are clickable.
+        """
+        import webbrowser
+        d = self.details
+        d.configure(state="normal")
+        d.delete("1.0", "end")
+        for t in d.tag_names():
+            if t.startswith("link"):
+                d.tag_delete(t)
+        f = ui.FONTS
+        d.configure(tabs=("150",), padx=8, pady=6, spacing1=1, spacing3=1)
+        d.tag_configure("title", font=f.get("title"))
+        d.tag_configure("subtitle", font=f.get("bold"), foreground="#555555", spacing3=6)
+        d.tag_configure("desc", lmargin1=0, lmargin2=0, spacing3=8)
+        d.tag_configure("h", font=f.get("bold"), foreground="#1f5fa8", spacing1=10, spacing3=3)
+        d.tag_configure("row", lmargin1=6, lmargin2=156)
+        d.tag_configure("label", foreground="#6b6b6b")
+        d.tag_configure("good", foreground="#0b6e4f", font=f.get("bold"))
+        d.tag_configure("bad", foreground="#b3261e", font=f.get("bold"))
+        d.tag_configure("muted", foreground="#888888")
+        d.insert("end", title + "\n", "title")
+        if subtitle:
+            d.insert("end", subtitle + "\n", "subtitle")
+        if description:
+            d.insert("end", description + "\n", "desc")
+        n = 0
+        for heading, rows in sections:
+            rows = [r for r in rows if r[1] not in ("", None)]
+            if not rows:
+                continue
+            d.insert("end", heading + "\n", "h")
+            for row in rows:
+                label, value = row[0], str(row[1])
+                style = row[2] if len(row) > 2 else None
+                d.insert("end", f"{label}\t", ("row", "label"))
+                if isinstance(style, tuple) and style[0] == "link":
+                    n += 1
+                    tag = f"link{n}"
+                    d.tag_configure(tag, foreground="#1f5fa8", underline=True)
+                    d.tag_bind(tag, "<Button-1>", lambda e, u=style[1]: webbrowser.open(u))
+                    d.tag_bind(tag, "<Enter>", lambda e: d.configure(cursor="hand2"))
+                    d.tag_bind(tag, "<Leave>", lambda e: d.configure(cursor=""))
+                    d.insert("end", value, ("row", tag))
+                else:
+                    d.insert("end", value, ("row", style) if style else ("row",))
+                d.insert("end", "\n", "row")
+        d.configure(state="disabled")
+        d.yview_moveto(0)
+
     def set_photo(self, data: bytes | None, msg: str = "") -> None:
         img = ui.load_image_bytes(data, 360, 300) if data else None
         self._photo = img

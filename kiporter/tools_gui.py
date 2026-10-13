@@ -853,58 +853,133 @@ class BomTab(ttk.Frame):
 
 
 class BomExportDialog(_ToolDialog):
+    """Board-house / distributor formats plus KiCad's own BOM templates (project presets, built-in
+    presets and BOM plugin scripts)."""
+
     def __init__(self, app: "App", tab: BomTab):
-        super().__init__(app, "Export BOM", "980x620")
+        super().__init__(app, "Export BOM", "1000x660")
         self.tab = tab
         s = app.settings
+        p = app.current_project()
+        self.templates = bom.kicad_templates(p.pro_file, app.ki) if p else []
+        self.kfmts = bom.kicad_formats(p.pro_file) if p else dict(bom.KICAD_BUILTIN_FORMATS)
+        self._preview_gen = 0
         b = self.body
         row = ttk.Frame(b)
         row.pack(fill="x")
         ttk.Label(row, text="Format:").pack(side="left")
-        self.fmt = ttk.Combobox(row, state="readonly", width=30, values=bom.FORMAT_NAMES)
-        self.fmt.set(s.bom_format if s.bom_format in bom.FORMAT_NAMES else bom.FORMAT_NAMES[0])
+        names = bom.FORMAT_NAMES + [t.name for t in self.templates]
+        self.fmt = ttk.Combobox(row, state="readonly", width=48, values=names, height=25)
+        self.fmt.set(s.bom_format if s.bom_format in names else bom.FORMAT_NAMES[0])
         self.fmt.pack(side="left", padx=6)
         self.fmt.bind("<<ComboboxSelected>>", lambda e: self._update())
-        self.ftype = tk.StringVar(value=s.bom_file_type)
-        ttk.Radiobutton(row, text="CSV", variable=self.ftype, value="csv").pack(side="left", padx=(12, 0))
-        ttk.Radiobutton(row, text="Excel (.xlsx)", variable=self.ftype, value="xlsx").pack(side="left", padx=6)
         self.dnp = tk.BooleanVar(value=s.bom_include_dnp)
-        ttk.Checkbutton(row, text="Include DNP", variable=self.dnp, command=self._update).pack(side="left", padx=6)
+        self.dnp_check = ttk.Checkbutton(row, text="Include DNP", variable=self.dnp, command=self._update)
+        self.dnp_check.pack(side="left", padx=6)
+
+        self.opts_shop = ttk.Frame(b)  # options for the board-house formats
+        self.ftype = tk.StringVar(value=s.bom_file_type)
+        ttk.Label(self.opts_shop, text="File type:").pack(side="left")
+        ttk.Radiobutton(self.opts_shop, text="CSV", variable=self.ftype, value="csv").pack(side="left", padx=4)
+        ttk.Radiobutton(self.opts_shop, text="Excel (.xlsx)", variable=self.ftype, value="xlsx").pack(side="left")
         self.cpl = tk.BooleanVar(value=s.bom_export_cpl)
-        self.cpl_check = ttk.Checkbutton(row, text="Also write pick-and-place (CPL) file", variable=self.cpl)
-        self.cpl_check.pack(side="left", padx=6)
+        self.cpl_check = ttk.Checkbutton(self.opts_shop, text="Also write pick-and-place (CPL) file",
+                                         variable=self.cpl)
+        self.cpl_check.pack(side="left", padx=14)
+        self.opts_kicad = ttk.Frame(b)  # options for KiCad presets
+        ttk.Label(self.opts_kicad, text="KiCad output format:").pack(side="left")
+        self.kfmt = ttk.Combobox(self.opts_kicad, state="readonly", width=36, values=list(self.kfmts))
+        self.kfmt.current(len(self.kfmts) - 1 if "Project format (as set up in KiCad)" in self.kfmts else 0)
+        self.kfmt.pack(side="left", padx=6)
+        self.kfmt.bind("<<ComboboxSelected>>", lambda e: self._update())
+
         self.notes = tk.StringVar()
-        ttk.Label(b, textvariable=self.notes, wraplength=940, justify="left", style="Muted.TLabel").pack(
-            fill="x", pady=(8, 2))
-        ttk.Button(b, text="Open the shop's BOM / upload page", command=self._open_url).pack(anchor="w")
-        ttk.Label(b, text="Preview:", style="Bold.TLabel").pack(anchor="w", pady=(8, 0))
+        self.notes_label = ttk.Label(b, textvariable=self.notes, wraplength=960, justify="left", style="Muted.TLabel")
+        self.link = ttk.Button(b, text="Open the shop's BOM / upload page", command=self._open_url)
+        self.prev_label = ttk.Label(b, text="Preview:", style="Bold.TLabel")
         pf = ttk.Frame(b)
-        pf.pack(fill="both", expand=True)
-        self.prev = ttk.Treeview(pf, show="headings", height=10)
+        self.prev = ttk.Treeview(pf, show="headings", height=11)
         xsb = ttk.Scrollbar(pf, orient="horizontal", command=self.prev.xview)
         self.prev.configure(xscrollcommand=xsb.set)
         self.prev.pack(fill="both", expand=True)
         xsb.pack(fill="x")
+        self.pf = pf
         self.warn = tk.StringVar()
-        ttk.Label(b, textvariable=self.warn, foreground="#b3261e", wraplength=940, justify="left").pack(
-            fill="x", pady=4)
+        self.warn_label = ttk.Label(b, textvariable=self.warn, foreground="#b3261e", wraplength=960, justify="left")
         out = ttk.Frame(b)
-        out.pack(fill="x", pady=(4, 0))
         ttk.Label(out, text="Save to folder:").pack(side="left")
-        p = app.current_project()
         self.out_dir = tk.StringVar(value=str((p.dir / "bom-exports") if p else Path.home()))
         ttk.Entry(out, textvariable=self.out_dir).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(out, text="…", width=3, command=self._pick).pack(side="left")
+        self.out_row = out
         bottom = ttk.Frame(b)
-        bottom.pack(fill="x", pady=(10, 0))
         ttk.Label(bottom, textvariable=self.busy, foreground="#b3261e").pack(side="left")
         ttk.Button(bottom, text="Export", command=self.export, style="Accent.TButton").pack(side="right")
+        self.bottom = bottom
         self._update()
+
+    # ---------------------------------------------------------------- helpers
+    def _template(self) -> bom.KicadTemplate | None:
+        return next((t for t in self.templates if t.name == self.fmt.get()), None)
 
     def _format(self) -> bom.BomFormat:
         return bom.get_format(self.fmt.get())
 
+    def _relayout(self, kicad: bool) -> None:
+        for w in (self.opts_shop, self.opts_kicad, self.notes_label, self.link, self.prev_label, self.pf,
+                  self.warn_label, self.out_row, self.bottom):
+            w.pack_forget()
+        (self.opts_kicad if kicad else self.opts_shop).pack(fill="x", pady=(8, 0))
+        self.notes_label.pack(fill="x", pady=(8, 2))
+        if not kicad:
+            self.link.pack(anchor="w")
+        self.prev_label.pack(anchor="w", pady=(8, 0))
+        self.pf.pack(fill="both", expand=True)
+        self.warn_label.pack(fill="x", pady=4)
+        self.out_row.pack(fill="x", pady=(4, 0))
+        self.bottom.pack(fill="x", pady=(10, 0))
+
+    def _show_rows(self, rows: list[list]) -> None:
+        self.prev.delete(*self.prev.get_children())
+        if not rows:
+            self.prev["columns"] = []
+            return
+        width = max(len(r) for r in rows)
+        cols = [f"c{i}" for i in range(width)]
+        self.prev["columns"] = cols
+        head = list(rows[0]) + [""] * (width - len(rows[0]))
+        for c, h in zip(cols, head):
+            self.prev.heading(c, text=h)
+            self.prev.column(c, width=120 if width > 1 else 900, stretch=True)
+        for r in rows[1:60]:
+            self.prev.insert("", "end", values=list(r))
+
     def _update(self) -> None:
+        t = self._template()
+        self._relayout(t is not None)
+        if t:
+            self.dnp_check.state(["disabled"])
+            what = {"project": "your project's KiCad BOM settings", "built-in": "a KiCad built-in preset",
+                    "user": "a BOM plugin configured in KiCad", "kicad": "a BOM plugin script shipped with KiCad"}
+            self.notes.set(f"Uses {what.get(t.source, 'KiCad')} - the same output KiCad's BOM tools produce. "
+                           + ("Grouping, fields and DNP handling come from the preset." if t.kind == "preset" else
+                              "The script runs on a netlist exported with kicad-cli."))
+            self.warn.set("")
+            self._preview_gen += 1
+            gen = self._preview_gen
+            self._show_rows([["Generating preview…"]])
+            p = self.app.current_project()
+            fmt = self.kfmts.get(self.kfmt.get())
+
+            def work():
+                import tempfile
+                td = Path(tempfile.mkdtemp(prefix="kiporter_bomprev_"))
+                files = bom.export_kicad_template(t, p.pro_file, self.app.ki, td, "preview", fmt)
+                return bom.preview_rows(files[0])
+            self.app.run_bg(work, lambda rows: gen == self._preview_gen and self._show_rows(rows),
+                            lambda e: gen == self._preview_gen and self._show_rows([[f"Preview failed: {e}"]]))
+            return
+        self.dnp_check.state(["!disabled"])
         f = self._format()
         boards = max(int(self.tab.boards.get() or 1), 1)
         note = f.notes or ""
@@ -912,15 +987,7 @@ class BomExportDialog(_ToolDialog):
             note = f"Quantities are multiplied by the {boards} board(s) set on the BOM tab. " + note
         self.notes.set(note)
         self.cpl_check.state(["!disabled"] if f.cpl else ["disabled"])
-        rows = bom.bom_rows(self.tab.lines, f, boards, self.dnp.get())
-        self.prev.delete(*self.prev.get_children())
-        cols = [f"c{i}" for i in range(len(rows[0]))]
-        self.prev["columns"] = cols
-        for c, h in zip(cols, rows[0]):
-            self.prev.heading(c, text=h)
-            self.prev.column(c, width=120, stretch=True)
-        for r in rows[1:60]:
-            self.prev.insert("", "end", values=r)
+        self._show_rows(bom.bom_rows(self.tab.lines, f, boards, self.dnp.get()))
         miss = bom.missing_fields(self.tab.lines, f)
         self.warn.set((f"{len(miss)} line(s) are missing data this shop needs: " + "; ".join(miss[:8]) +
                        (" …" if len(miss) > 8 else "") +
@@ -938,21 +1005,27 @@ class BomExportDialog(_ToolDialog):
             self.out_dir.set(str(Path(d)))
 
     def export(self) -> None:
-        f = self._format()
         s = self.app.settings
-        s.bom_format, s.bom_file_type, s.bom_include_dnp, s.bom_export_cpl = (
-            f.name, self.ftype.get(), self.dnp.get(), self.cpl.get())
-        s.save()
         p = self.app.current_project()
         base = p.name.replace(" ", "_") if p else "project"
         out_dir = Path(self.out_dir.get())
-        want_cpl = self.cpl.get() and f.cpl and p
-        lines, boards, dnp, ftype = (self.tab.lines, max(int(self.tab.boards.get() or 1), 1), self.dnp.get(),
-                                     self.ftype.get())
+        t = self._template()
+        s.bom_format = self.fmt.get()
+        if t:
+            s.save()
+            fmt = self.kfmts.get(self.kfmt.get())
+            work = lambda: bom.export_kicad_template(t, p.pro_file, self.app.ki, out_dir, base, fmt)  # noqa: E731
+        else:
+            f = self._format()
+            s.bom_file_type, s.bom_include_dnp, s.bom_export_cpl = self.ftype.get(), self.dnp.get(), self.cpl.get()
+            s.save()
+            want_cpl = self.cpl.get() and f.cpl and p
+            lines, boards, dnp, ftype = (self.tab.lines, max(int(self.tab.boards.get() or 1), 1), self.dnp.get(),
+                                         self.ftype.get())
 
-        def work():
-            places = bom.read_positions(p.pro_file, self.app.ki) if want_cpl else None
-            return bom.export(lines, f, out_dir, base, boards, dnp, ftype, places)
+            def work():
+                places = bom.read_positions(p.pro_file, self.app.ki) if want_cpl else None
+                return bom.export(lines, f, out_dir, base, boards, dnp, ftype, places)
 
         def done(paths):
             self.app.log("Exported: " + ", ".join(str(x) for x in paths))
