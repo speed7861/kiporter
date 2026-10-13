@@ -222,11 +222,14 @@ def ensure_lib_table_entry(table: Path, kind: str, name: str, uri: str, descr: s
         node = sexpr.parse(table.read_text(encoding="utf-8"))
     else:
         node = [root_name, ["version", "7"]]
+    # a table saved with the other kind's header ("sym_lib_table" in fp-lib-table) makes KiCad skip it
+    wrong_header = node[0] != root_name
+    node[0] = root_name
     for lib in sexpr.children(node, "lib"):
         n = sexpr.child(lib, "name")
         if n and sexpr.unquote(n[1]) == name:
             u = sexpr.child(lib, "uri")
-            if u and sexpr.unquote(u[1]) == uri:
+            if u and sexpr.unquote(u[1]) == uri and not wrong_header:
                 return False
             if u:
                 u[1] = sexpr.quote(uri)
@@ -242,6 +245,24 @@ def ensure_lib_table_entry(table: Path, kind: str, name: str, uri: str, descr: s
     for c in node[1:]:
         lines.append("\t" + sexpr.dump_inline(c))
     lines.append(")")
+    table.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return True
+
+
+def lib_table_header_ok(table: Path, kind: str) -> bool:
+    """False when the table starts with the other kind's header - KiCad then skips it with a warning."""
+    try:
+        return sexpr.parse(table.read_text(encoding="utf-8"))[0] == f"{kind}_lib_table"
+    except (OSError, ValueError, IndexError):
+        return True  # missing or unreadable: not this problem
+
+
+def fix_lib_table_header(table: Path, kind: str) -> bool:
+    if lib_table_header_ok(table, kind):
+        return False
+    node = sexpr.parse(table.read_text(encoding="utf-8"))
+    body = node[1:] if sexpr.child(node, "version") else [["version", "7"]] + node[1:]
+    lines = [f"({kind}_lib_table"] + ["\t" + sexpr.dump_inline(c) for c in body] + [")"]
     table.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return True
 

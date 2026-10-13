@@ -234,3 +234,17 @@ def test_resistor_symbol_style():
     assert not symstyle.restyle_symbol(sexpr.parse(src.format(kw="Resistors")), "keep")
     assert not symstyle.restyle_symbol(sexpr.parse(src.format(kw="NTC Thermistors")), "ansi")
     assert not symstyle.restyle_symbol(sexpr.parse(src.replace('"Reference" "R"', '"Reference" "C"')), "ansi")
+
+
+def test_lib_table_wrong_header_is_repaired(tmp_path):
+    from kiporter import kicad_env
+    t = tmp_path / "fp-lib-table"
+    t.write_text("(sym_lib_table\n)\n", encoding="utf-8")
+    assert not kicad_env.lib_table_header_ok(t, "fp")
+    assert kicad_env.ensure_lib_table_entry(t, "fp", "Parts", "${KIPRJMOD}/libs/Parts.pretty")
+    text = t.read_text(encoding="utf-8")
+    assert text.startswith("(fp_lib_table") and '(name "Parts")' in text
+    assert not kicad_env.ensure_lib_table_entry(t, "fp", "Parts", "${KIPRJMOD}/libs/Parts.pretty")
+    t.write_text("(sym_lib_table\n)\n", encoding="utf-8")
+    assert kicad_env.fix_lib_table_header(t, "fp")
+    assert t.read_text(encoding="utf-8") == "(fp_lib_table\n\t(version 7)\n)\n"

@@ -804,7 +804,7 @@ def localize_project(project_dir: Path, target: LibraryTarget, ki: KiCadInstall,
 
 # ================================================================ KiCad setup check
 def check_setup(ki: KiCadInstall, project_dir: Path | None, log: Log = _nolog) -> list[Issue]:
-    from .kicad_env import ipc_api_enabled, read_json
+    from .kicad_env import ipc_api_enabled, lib_table_header_ok, read_json
     issues: list[Issue] = []
     vars_ = read_json(ki.config_dir / "kicad_common.json").get("environment", {}).get("vars") or {}
     share = ki.share_dir
@@ -828,6 +828,15 @@ def check_setup(ki: KiCadInstall, project_dir: Path | None, log: Log = _nolog) -
                                 f"reset to KiCad default ({default})", ("reset_var", var)))
     env = kicad_env_vars(ki, project_dir)
     for kind in ("sym", "fp"):
+        for scope, folder in (("project", project_dir), ("global", ki.config_dir)):
+            table = folder / f"{kind}-lib-table" if folder else None
+            if table and table.exists() and not lib_table_header_ok(table, kind):
+                what = "symbol" if kind == "sym" else "footprint"
+                issues.append(Issue("Library table", table.name,
+                                    f"the {scope} {what} library table {table} starts with the wrong header, so "
+                                    f"KiCad warns at start-up and skips it",
+                                    "repair the header", ("fix_header", str(table), kind)))
+    for kind in ("sym", "fp"):
         for e in all_lib_entries(ki, project_dir, kind):
             p = e.path(env)
             label = f"{'symbol' if kind == 'sym' else 'footprint'} library '{e.name}' ({e.scope})"
@@ -847,7 +856,7 @@ def check_setup(ki: KiCadInstall, project_dir: Path | None, log: Log = _nolog) -
 
 
 def apply_setup_fixes(ki: KiCadInstall, issues: list[Issue], log: Log = _nolog) -> str:
-    from .kicad_env import enable_ipc_api, read_json, running_kicad_processes, write_json
+    from .kicad_env import enable_ipc_api, fix_lib_table_header, read_json, running_kicad_processes, write_json
     chosen = [i for i in issues if i.action and i.selected]
     if not chosen:
         return "Nothing selected."
@@ -866,6 +875,10 @@ def apply_setup_fixes(ki: KiCadInstall, issues: list[Issue], log: Log = _nolog) 
         elif act[0] == "remove_entry":
             if remove_lib_table_entry(Path(act[1]), act[2]):
                 log(f"Removed '{act[2]}' from {act[1]}")
+        elif act[0] == "fix_header":
+            backup_files([Path(act[1])], Path(act[1]).parent / "kiporter-backup")
+            if fix_lib_table_header(Path(act[1]), act[2]):
+                log(f"Repaired the header of {act[1]}")
         elif act[0] == "enable_ipc":
             enable_ipc_api(ki)
             log("Enabled KiCad IPC API")
