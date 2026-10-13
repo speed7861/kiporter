@@ -83,8 +83,7 @@ class SuppliersPanel(ttk.Notebook):
                         show="" if sv.get() else "•")).grid(row=r, column=2, padx=4)
             if flds:
                 ttk.Button(grid, text="Enter", style="Accent.TButton", width=10,
-                           command=lambda n=name: self.enter(n)).grid(row=0, column=3, rowspan=max(len(flds), 1),
-                                                                      sticky="ns", padx=(8, 0), pady=2)
+                           command=lambda n=name: self.enter(n)).grid(row=0, column=3, sticky="n", padx=(8, 0), pady=2)
             grid.columnconfigure(1, weight=1)
             ttk.Label(page, text="How to get the key", style="Bold.TLabel").pack(anchor="w")
             txt = ui.scrolled_text(page, height=9, wrap="word", relief="flat", font=ui.FONTS.get("normal"))

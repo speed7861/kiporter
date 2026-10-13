@@ -10,6 +10,19 @@ PCB editor) and finds your open project automatically.
 
 Inspired by [Import-LIB-KiCad-Plugin](https://github.com/Steffen-W/Import-LIB-KiCad-Plugin).
 
+![Search results with stock and lead times, and a footprint preview](docs/screenshots/search-footprint.png)
+
+## Screenshots
+
+| | |
+|---|---|
+| **3D preview** rendered by KiCad<br>![3D preview](docs/screenshots/search-3d.png) | **Part details** and where the CAD model comes from<br>![Part details](docs/screenshots/details-cad-sources.png) |
+| **BOM stock check** across suppliers<br>![BOM stock check](docs/screenshots/bom-stock.png) | **BOM export** for board houses and distributors<br>![BOM export](docs/screenshots/bom-export.png) |
+| **Fabrication files** in one click<br>![Fabrication outputs](docs/screenshots/fabrication.png) | **Library browser** with symbol, footprint and 3D previews<br>![Library browser](docs/screenshots/library-browser.png) |
+| **Supplier setup** with step-by-step key directions<br>![Supplier settings](docs/screenshots/settings-suppliers.png) | |
+
+The screenshots show StickHub, one of the example projects that ships with KiCad.
+
 ## Why I made Kiporter
 
 I built Kiporter out of frustration. Getting a part into KiCad, with its symbol, footprint and
