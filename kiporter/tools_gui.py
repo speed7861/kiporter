@@ -9,7 +9,8 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING, Callable
 
-from . import alternatives, bom, fields, kicad_control, kicad_env, library, libtools, providers, render, schedit, sexpr, ui
+from . import (alternatives, bom, cad, fields, kicad_control, kicad_env, library, libtools, providers, render,
+               schedit, sexpr, similar, ui)
 
 if TYPE_CHECKING:
     from .gui import App
@@ -707,6 +708,7 @@ class BomTab(ttk.Frame):
         ttk.Button(bar, text="Stock report…", command=self.export_stock).pack(side="left", padx=6)
         self.switch_btn = ttk.Button(bar, text="Use suggested LCSC part", command=self.use_suggested)
         self.switch_btn.pack(side="left")
+        ttk.Button(bar, text="Find alternatives…", command=self.find_alternatives).pack(side="left", padx=(6, 0))
         ttk.Button(bar, text="Save to schematic…", command=self.save_to_schematic).pack(side="left", padx=6)
         self.info = tk.StringVar(value="Load the BOM of the selected project (reads the saved schematic and PCB).")
         ttk.Label(self, textvariable=self.info, style="Muted.TLabel").pack(fill="x", pady=(6, 0))
@@ -729,6 +731,7 @@ class BomTab(ttk.Frame):
         self.tree.bind("<Double-1>", self._search_line)
         self.menu = tk.Menu(self, tearoff=False)
         self.menu.add_command(label="Use suggested LCSC part", command=self.use_suggested)
+        self.menu.add_command(label="Find alternatives for this line…", command=self.find_alternatives)
         self.menu.add_command(label="Use every suggestion that is the same part", command=self.use_same_parts)
         self.menu.add_command(label="Switch back to the original part", command=self.switch_back)
         self.menu.add_command(label="Save switched parts to the schematic…", command=self.save_to_schematic)
@@ -1023,6 +1026,13 @@ class BomTab(ttk.Frame):
         self.info.set(f"Saved to the schematic ({count} symbols). Open it in KiCad and press 'Update PCB from "
                       "Schematic' to copy the fields to the board.")
 
+    def find_alternatives(self) -> None:
+        sel = self.tree.selection()
+        if len(sel) != 1:
+            messagebox.showinfo(APP_TITLE, "Select one BOM line first.")
+            return
+        AlternativesDialog(self.app, self, self.lines[int(sel[0])])
+
     def use_same_parts(self) -> None:
         self._switch(list(self.lines), only_exact=True)
 
@@ -1070,6 +1080,160 @@ class BomTab(ttk.Frame):
         self.app.search_var.set(ln.mpn or ln.lcsc or ln.value)
         self.app.nb.select(0)
         self.app.search(show_all=True)  # looking for this one part: do not let the CAD filter hide it
+
+
+class AlternativesDialog(_ToolDialog):
+    """The closest in-stock LCSC parts for one BOM line, compared spec by spec."""
+    COLS = [("lcsc", "LCSC #", 90), ("mpn", "Part number", 190), ("mfr", "Manufacturer", 130), ("pkg", "Package", 110),
+            ("stock", "In stock", 80), ("price", "Price", 70), ("match", "Match", 60), ("notes", "Compared with your part", 520)]
+
+    def __init__(self, app: "App", tab: "BomTab", ln: bom.BomLine):
+        super().__init__(app, f"Alternatives for {ln.refs_str}", "1320x560")
+        self.tab, self.ln = tab, ln
+        self.ref: providers.PartResult | None = None
+        self.cands: list[similar.Candidate] = []
+        b = self.body
+        self.head = tk.StringVar(value=f"{ln.refs_str}:  {ln.mpn or ln.value}   {ln.manufacturer}")
+        ttk.Label(b, textvariable=self.head, style="Bold.TLabel").pack(anchor="w")
+        self.specs = tk.StringVar(value="Looking the part up at LCSC…")
+        ttk.Label(b, textvariable=self.specs, style="Muted.TLabel", wraplength=1280, justify="left").pack(
+            anchor="w", pady=(2, 6))
+        row = ttk.Frame(b)
+        row.pack(fill="x")
+        ttk.Label(row, text="Narrow by:").pack(side="left")
+        self.words = tk.StringVar()
+        ent = ttk.Entry(row, textvariable=self.words, width=44)
+        ent.pack(side="left", padx=6)
+        ent.bind("<Return>", lambda e: self.search())
+        ttk.Button(row, text="Search", command=self.search).pack(side="left")
+        ttk.Label(row, text="  spec words such as  2x2P 4.2mm  (blank = whole category). Only in-stock parts are "
+                            "listed.", style="Muted.TLabel").pack(side="left")
+        frame = ttk.Frame(b)
+        frame.pack(fill="both", expand=True, pady=6)
+        self.tree = ttk.Treeview(frame, show="headings", columns=[c[0] for c in self.COLS], selectmode="browse")
+        for cid, head, w in self.COLS:
+            self.tree.heading(cid, text=head)
+            self.tree.column(cid, width=w, stretch=cid == "notes", anchor="e" if cid in ("stock", "price", "match")
+                             else "w")
+        ysb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        xsb = ttk.Scrollbar(frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns")
+        xsb.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.fit.set(""))
+        self.tree.bind("<Double-1>", lambda e: self.open_page())
+        self.fit = tk.StringVar()
+        ttk.Label(b, textvariable=self.fit, wraplength=1280, justify="left").pack(anchor="w")
+        bottom = ttk.Frame(b)
+        bottom.pack(fill="x", pady=(6, 0))
+        ttk.Label(bottom, textvariable=self.busy, foreground="#b3261e").pack(side="left")
+        ttk.Button(bottom, text="Use this part", command=self.use, style="Accent.TButton").pack(side="right")
+        ttk.Button(bottom, text="Check footprint fit", command=self.check_fit).pack(side="right", padx=6)
+        ttk.Button(bottom, text="Open LCSC page", command=self.open_page).pack(side="right")
+        self.search(first=True)
+
+    def _lcsc(self) -> providers.LCSC:
+        return self.app.providers["LCSC"]
+
+    def _pins(self) -> int | None:
+        f = self._board_footprint()
+        try:
+            return len(similar.holes(f)[0]) or None if f else None
+        except (OSError, ValueError):
+            return None
+
+    def _board_footprint(self) -> Path | None:
+        p = self.app.current_project()
+        f = libtools.FootprintIndex(self.app.ki, p.dir if p else None).file(self.ln.footprint)
+        return f if f and f.is_file() else None
+
+    def search(self, first: bool = False) -> None:
+        ln, words = self.ln, self.words.get().strip()
+        need = self.tab._need(ln)
+
+        def work():
+            ref = self.ref
+            if ref is None:
+                offer = ln.offers.get("LCSC")
+                if isinstance(offer, providers.PartResult):
+                    ref = offer
+                else:
+                    q = ln.lcsc or ln.mpn or alternatives.value_part_number(ln)
+                    res = self._lcsc().search(q, limit=10) if q else []
+                    ref = next((r for r in res if r.supplier_pn == ln.lcsc), None) if ln.lcsc else \
+                        providers.best_match(res, q)
+            if ref is None:  # LCSC does not know the part: fall back to a plain search with the user's words
+                kw = words or alternatives.keyword(ln) or ln.mpn or ln.value
+                res = [r for r in self._lcsc().search(kw, limit=50) if r.stock]
+                res.sort(key=lambda r: -(r.stock or 0))
+                return None, [similar.Candidate(r) for r in res], kw
+            cands = similar.find(ref, lambda par, cat, kw, **o: self._lcsc().browse(par, cat, kw, **o), need,
+                                 self._pins(), None if first else words)
+            layout = similar.pin_layout(ref, self._pins())
+            return ref, cands, " ".join(([layout] if layout else []) + similar.search_words(ref, 1)) if first else words
+
+        def done(res):
+            self.ref, self.cands, used = res
+            if first:
+                self.words.set(used)
+            ref = self.ref
+            if ref is None:
+                self.specs.set("LCSC does not list this part, so its specs are unknown. Showing a plain LCSC search "
+                               "for the words below - change them to describe the part (for example '10 pin 1.27mm "
+                               "IDC header').")
+            else:
+                attrs = "; ".join(f"{k}: {v}" for k, v in similar.attributes(ref).items())
+                self.specs.set(f"Your part at LCSC: {ref.supplier_pn}  {ref.mpn}  ({ref.stock_str or 0} in stock)  •  "
+                               f"{ref.category}  •  {attrs or 'LCSC lists no specs for it, so matches are weak'}")
+            self.tree.delete(*self.tree.get_children())
+            for i, c in enumerate(self.cands):
+                p = c.part
+                self.tree.insert("", "end", iid=str(i), values=(
+                    p.supplier_pn, p.mpn, p.manufacturer, p.package, p.stock_str, p.price_str,
+                    c.percent if ref is not None else "", c.summary() if ref is not None else p.description))
+            self.fit.set("" if self.cands else "Nothing in stock matched. Try fewer or different words.")
+        self.run(work, done, "Searching LCSC")
+
+    def _selected(self) -> similar.Candidate | None:
+        sel = self.tree.selection()
+        return self.cands[int(sel[0])] if sel else None
+
+    def open_page(self) -> None:
+        c = self._selected()
+        if c and c.part.url:
+            import webbrowser
+            webbrowser.open(c.part.url)
+
+    def check_fit(self) -> None:
+        c = self._selected()
+        mine = self._board_footprint()
+        if not c:
+            return
+        if not mine:
+            self.fit.set(f"Cannot check: the board's footprint {self.ln.footprint} was not found in your libraries.")
+            return
+
+        def done(res):
+            ok, msg = res
+            self.fit.set(("✔ " if ok else "✖ ") + f"{c.part.supplier_pn}: {msg}")
+        self.fit.set("")
+        self.run(lambda: similar.footprint_fit(mine, cad.staged(c.part.supplier_pn).footprint_files[0]), done,
+                 "Downloading the part's footprint")
+
+    def use(self) -> None:
+        c = self._selected()
+        if not c:
+            return
+        why = f"chosen alternative ({c.percent} match)" if self.ref is not None else "chosen alternative"
+        alternatives.switch_back(self.ln)
+        alternatives.switch(self.ln, alternatives.Alternative(c.part, why))
+        self.tab._redraw()
+        self.tab.info.set(f"{self.ln.refs_str} switched to {c.part.supplier_pn} {c.part.mpn}. Use 'Save to schematic…' "
+                          "to write it into the schematic.")
+        self.destroy()
 
 
 class BomExportDialog(_ToolDialog):

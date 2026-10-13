@@ -208,6 +208,10 @@ Click **Save** when you're done.
   same value and package with the same dielectric, at least the same voltage and the same or
   better tolerance. A part LCSC has enough of is never replaced.
   **Use suggested LCSC part** switches BOM lines to the suggestion (right-click to switch back).
+- **Find alternatives:** for any BOM line, lists the closest in-stock LCSC parts from the same
+  category, compared spec by spec (pin layout, pitch, mounting, value, ratings). Each row shows a
+  match percentage and what differs. **Check footprint fit** tells you whether a part's pins and
+  mounting holes land on the footprint already on your board.
 - **Save to schematic:** writes the switched part numbers into the fields of the symbols already
   in your schematic. No symbol or footprint is replaced or moved, and a backup is kept. Close the
   Schematic Editor first, then run Update PCB from Schematic to copy the fields to the board.

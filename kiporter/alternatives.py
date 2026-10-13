@@ -310,6 +310,16 @@ def _replacement(ln, results: list[PartResult], need: int, search, ref: PartResu
     return found
 
 
+def _other_listing(ln, need: int, search) -> Alternative | None:
+    """LCSC sometimes lists one part twice (0026013115 and 26013115): find the listing that has stock."""
+    if not ln.mpn or search is None:
+        return None
+    words = [ln.mpn] + ([ln.mpn.lstrip("0")] if ln.mpn.isdigit() and ln.mpn.startswith("0") else [])
+    hits = [r for w in words for r in search(w) if r.supplier_pn != ln.lcsc]
+    pick = same_part_pick(ln, hits, need)
+    return pick if pick is not None and (pick.part.stock or 0) >= need else None
+
+
 def suggest(ln, results: list[PartResult], need: int, search=None) -> Alternative | None:
     """LCSC suggestion for a line. results: LCSC's answer for the line's LCSC or part number;
     search(keyword) -> results is used for same-value lookups.
@@ -320,6 +330,10 @@ def suggest(ln, results: list[PartResult], need: int, search=None) -> Alternativ
         own = next((r for r in results if r.supplier_pn == ln.lcsc), None)
         if own is not None and (own.stock or 0) >= need:
             return None  # already an LCSC part, and in stock
+        other = _other_listing(ln, need, search)
+        if other is not None:
+            other.reason = f"same part, another LCSC listing; {ln.lcsc} has {(own.stock if own else 0) or 0} in stock"
+            return other
         found = _replacement(ln, results, need, search, own)
         if found is not None and own is not None:
             found.reason += f"; {ln.lcsc} has {own.stock or 0} in stock"

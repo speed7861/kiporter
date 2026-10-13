@@ -241,9 +241,24 @@ class LCSC(Provider):
                     found.setdefault(r.lcsc_id or r.mpn, r)
         return _best_keyword_matches(keyword, list(found.values()))[:limit]
 
-    def _query(self, keyword: str, limit: int = 50) -> list[PartResult]:
+    def browse(self, parent: str, category: str, keyword: str = "", limit: int = 100,
+               in_stock: bool = True, page: int = 1, brand: str = "") -> list[PartResult]:
+        """Parts of one category (e.g. "Connectors" / "Wire To Board Connector"), best stocked first,
+        optionally narrowed by words and by manufacturer."""
+        if not category:
+            return self._query(keyword, limit) if keyword else []
+        body = {"firstSortName": parent, "secondSortName": category, "sortMode": "STOCK_SORT", "sortASC": "DESC",
+                "currentPage": page}
+        if brand:
+            body["componentBrandList"] = [brand]
+        if in_stock:
+            body["stockFlag"] = True
+        return self._query(keyword, limit, body)
+
+    def _query(self, keyword: str, limit: int = 50, extra: dict | None = None) -> list[PartResult]:
         try:
-            r = HTTP.post(JLC_SEARCH, json={"keyword": keyword, "currentPage": 1, "pageSize": limit},
+            r = HTTP.post(JLC_SEARCH, json={"keyword": keyword or None, "currentPage": 1, "pageSize": limit,
+                                            **(extra or {})},
                               headers=UA, timeout=TIMEOUT)
             r.raise_for_status()
             data = r.json()
@@ -276,6 +291,7 @@ class LCSC(Provider):
                            if it.get("productBigImageAccessId") else ""),
                 extra={
                     "JLCPCB library": {"base": "Basic", "expand": "Extended"}.get(lib_type, lib_type),
+                    "Parent category": it.get("secondSortName") or "",
                     "Attributes": "; ".join(f"{a.get('attribute_name_en')}: {a.get('attribute_value_name')}"
                                             for a in (it.get("attributes") or [])),
                 },

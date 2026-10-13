@@ -423,7 +423,7 @@ def test_bom_capacitor_replacement_keeps_the_ratings():
     asked = []
     a = alt.suggest(ln, [own], 2, lambda kw: asked.append(kw) or pool)
     assert a.part.supplier_pn == "C108079" and "X7R" in a.reason and "C2649559 has 0 in stock" in a.reason
-    assert asked[0] == "100nF 0603 X7R"
+    assert asked[:2] == ["CC0603KPX7R7BB104", "100nF 0603 X7R"]
     own.stock = 500
     assert alt.suggest(ln, [own], 2, lambda kw: pool) is None  # in stock again: left alone
 
@@ -437,3 +437,50 @@ def test_best_match_ignores_leading_zeros_of_numeric_part_numbers():
     from kiporter.bom import BomLine
     j1 = BomLine(refs=["J1"], qty=1, value="903253010", footprint="x:y", data={"mpn": "903253010"})
     assert alt.suggest(j1, hits, 1).exact
+
+
+def test_similar_parts_by_specs_and_footprint_fit(tmp_path):
+    from kiporter import alternatives as alt, similar
+    from kiporter.bom import BomLine
+    from kiporter.providers import PartResult
+
+    def conn(pn, mpn, mfr, stock, **attrs):
+        base = {"Number of Rows": "2", "Row Spacing": "4.2mm", "Mounting Type": "Right Angle", "Contact Plating": "Tin"}
+        base.update(attrs)
+        return PartResult(source="LCSC", mpn=mpn, supplier_pn=pn, manufacturer=mfr, stock=stock, package="Push-Pull",
+                          category="Wire To Board Connector",
+                          extra={"Parent category": "Connectors",
+                                 "Attributes": "; ".join(f"{k}: {v}" for k, v in base.items())})
+    ref = conn("C1", "0026013115", "MOLEX", 0)
+    pool = [conn("C2", "39301040", "MOLEX", 4000, **{"Pins Structure": "2x2P"}),
+            conn("C3", "CLONE-2x2", "ACME", 90000, **{"Pins Structure": "2x2P"}),
+            conn("C4", "GOLD", "MOLEX", 500, **{"Contact Plating": "Gold"}),
+            conn("C5", "VERT", "MOLEX", 99999, **{"Mounting Type": "Through Hole"}),
+            conn("C6", "2x4", "MOLEX", 99999, **{"Pins Structure": "2x4P"})]
+    asked = []
+    got = similar.find(ref, lambda par, cat, kw, **o: asked.append((par, cat, kw, o)) or pool, need=2, pins=4)
+    assert [c.part.supplier_pn for c in got] == ["C2", "C3", "C4", "C5"]  # same maker first; the 8-pin part is dropped
+    assert got[0].score == 1 and "Contact Plating: Tin → Gold" in got[2].differs[0] and got[3].wrong
+    assert asked[0][:3] == ("Connectors", "Wire To Board Connector", "2x2P 4.2mm")
+    assert any(o.get("brand") == "MOLEX" for *_, o in asked)
+    cap = PartResult(source="LCSC", mpn="A", supplier_pn="C7", package="0603",
+                     extra={"Attributes": "Voltage Rating: 16V; Tolerance: ±10%; Capacitance: 100nF"})
+    better = PartResult(source="LCSC", mpn="B", supplier_pn="C8", package="0603", stock=5,
+                        extra={"Attributes": "Voltage Rating: 50V; Tolerance: ±5%; Capacitance: 100nF"})
+    assert similar.compare(cap, better).score == 1  # higher voltage and tighter tolerance still count as a match
+    assert similar.compare(better, cap).differs
+
+    fp = '(footprint "X" (pad "1" thru_hole circle (at {a}) (size 2.5 2.5) (drill 1.8)) ' \
+         '(pad "2" thru_hole circle (at {b}) (size 2.5 2.5) (drill 1.8)){extra})'
+    (tmp_path / "board.kicad_mod").write_text(fp.format(a="0 0", b="4.2 0", extra=' (pad "" np_thru_hole circle (at 2.1 7.3) (size 3 3) (drill 3))'), encoding="utf-8")
+    (tmp_path / "same.kicad_mod").write_text(fp.format(a="10 10", b="10 14.2", extra=""), encoding="utf-8")  # turned 90 degrees
+    (tmp_path / "wide.kicad_mod").write_text(fp.format(a="0 0", b="5.08 0", extra=""), encoding="utf-8")
+    ok, msg = similar.footprint_fit(tmp_path / "board.kicad_mod", tmp_path / "same.kicad_mod")
+    assert ok and "left unused" in msg
+    assert not similar.footprint_fit(tmp_path / "board.kicad_mod", tmp_path / "wide.kicad_mod")[0]
+
+    # an LCSC number with no stock: another listing of the same part number is found first
+    ln = BomLine(refs=["J4"], qty=1, value="0026013115", footprint="x:y", data={"mpn": "0026013115", "lcsc": "C1"})
+    dup = conn("C9", "26013115", "MOLEX", 3000)
+    a = alt.suggest(ln, [ref], 1, lambda kw: [dup] if kw == "26013115" else [ref])
+    assert a.exact and a.part.supplier_pn == "C9" and "another LCSC listing" in a.reason
