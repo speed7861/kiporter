@@ -51,6 +51,35 @@ class Alternative:
         return self.score >= SAME_PART
 
 
+_PART_NUMBER = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9][A-Za-z0-9\-/.,#+]{4,}$")
+
+
+def value_part_number(ln) -> str:
+    """The Value field when it holds a part number (MMBT2222A, 1N4148WS) on a line with no MPN field."""
+    v = (ln.value or "").strip()
+    if ln.mpn or ln.lcsc or not _PART_NUMBER.match(v):
+        return ""
+    kind = kind_of(ln.refs)
+    if kind and schematic_value(v, kind) is not None:
+        return ""  # 4k7, 100n ... are values, not part numbers
+    return v
+
+
+def generic_pick(ln, results: list[PartResult], need: int) -> Alternative | None:
+    """For a part number taken from the Value field (no manufacturer known): the best-stocked part whose
+    number starts with it, in the line's package - e.g. MMBT2222A -> MMBT2222ALT1G."""
+    target = _norm_mpn(value_part_number(ln))
+    if len(target) < 5:
+        return None
+    want = line_package(ln)
+    out = [Alternative(r, f"same part number ({value_part_number(ln)}), best stocked - check the maker and suffix")
+           for r in results if _norm_mpn(r.mpn).startswith(target) and _package_ok(want, r) is not False]
+    out = [a for a in out if a.part.stock]
+    if not out:
+        return None
+    return max(out, key=lambda a: ((a.part.stock or 0) >= need, _package_ok(want, a.part) is True, a.part.stock or 0))
+
+
 def kind_of(refs: list[str]) -> str | None:
     """resistor / capacitor / inductor when every reference is a plain R, C or L."""
     kinds = set()
@@ -208,6 +237,8 @@ def suggest(ln, results: list[PartResult], need: int, search=None) -> Alternativ
     search(keyword) -> results is used for a same-value lookup when LCSC does not list the part."""
     if ln.lcsc:
         return None  # already an LCSC part
+    if value_part_number(ln):
+        return generic_pick(ln, results, need)
     found = same_part_pick(ln, results, need)
     if found is not None:
         return found  # LCSC lists this very part: nothing else to recommend

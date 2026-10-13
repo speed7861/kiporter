@@ -364,7 +364,7 @@ def export(lines: list[BomLine], fmt: BomFormat, out_dir: Path, base: str, board
 
 def stock_status(ln: BomLine, need: int) -> str:
     """ok | low | none | no MPN | '' (not checked) for a line, given how many parts are needed."""
-    if not (ln.mpn or ln.lcsc):
+    if not (ln.mpn or ln.lcsc) and not ln.offers:
         return "no MPN"
     if not ln.offers:
         return ""

@@ -308,3 +308,25 @@ def test_bom_switch_to_lcsc_suggestion():
     hits = [PartResult(source="LCSC", mpn="RC0603", supplier_pn="C25804", description="10kΩ ±1%", package="0603", stock=5000)]
     c = alt.suggest(r, [], 1, lambda kw: hits if kw == "10k 0603 resistor" else [])
     assert c.part.supplier_pn == "C25804" and not c.exact
+
+
+def test_bom_value_used_as_part_number():
+    from kiporter import alternatives as alt
+    from kiporter.bom import BomLine, stock_status
+    from kiporter.providers import PartResult
+    q = BomLine(refs=["Q8", "Q9"], qty=2, value="MMBT2222A", footprint="Project_Parts:SOT-23")
+    assert alt.value_part_number(q) == "MMBT2222A"
+    assert alt.value_part_number(BomLine(refs=["R1"], qty=1, value="4k7", footprint="x:R_0603")) == ""
+    assert alt.value_part_number(BomLine(refs=["J1"], qty=1, value="Conn", footprint="x:y")) == ""
+    assert alt.value_part_number(BomLine(refs=["U1"], qty=1, value="LM358DR", footprint="x:y", data={"mpn": "LM358DR"})) == ""
+    res = [PartResult(source="LCSC", mpn="MMBT2222A", supplier_pn="C83939", package="SOT-23", stock=182289),
+           PartResult(source="LCSC", mpn="MMBT2222ALT1G", supplier_pn="C82460", package="SOT-23", stock=1434482),
+           PartResult(source="LCSC", mpn="MMBT2222AWT1G", supplier_pn="C28273", package="SC-70(SOT-323)", stock=9999999),
+           PartResult(source="LCSC", mpn="MMBT3904", supplier_pn="C20526", package="SOT-23", stock=9999999)]
+    a = alt.suggest(q, res, 6)
+    assert a.part.mpn == "MMBT2222ALT1G" and not a.exact
+    assert stock_status(q, 6) == "no MPN"
+    q.offers = {"LCSC": a.part}
+    assert stock_status(q, 6) == "ok"
+    alt.switch(q, a)
+    assert q.lcsc == "C82460" and q.mpn == "MMBT2222ALT1G"

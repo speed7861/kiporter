@@ -735,7 +735,7 @@ class BomTab(ttk.Frame):
     def _best(self, ln: bom.BomLine) -> tuple[str, str]:
         if ln.dnp:
             return "", "dnp"
-        if not (ln.mpn or ln.lcsc):
+        if not (ln.mpn or ln.lcsc) and not ln.offers:
             return "", "no MPN"
         offers = [(s, o) for s, o in ln.offers.items() if o is not None and not isinstance(o, str)]
         if not ln.offers:
@@ -801,10 +801,12 @@ class BomTab(ttk.Frame):
         self._gen += 1
         gen = self._gen
         # lines without a part number are still worth a look when they are plain R/C/L with a value
-        todo = [l for l in self.lines if not l.dnp and (l.mpn or l.lcsc or alternatives.keyword(l))]
+        todo = [l for l in self.lines if not l.dnp and (l.mpn or l.lcsc or alternatives.value_part_number(l)
+                                                        or alternatives.keyword(l))]
         for ln in todo:
             alternatives.switch_back(ln)
-            ln.offers = {s: None for s in self.sources} if (ln.mpn or ln.lcsc) else {}
+            ln.offers = {s: None for s in self.sources} \
+                if (ln.mpn or ln.lcsc or alternatives.value_part_number(ln)) else {}
             ln.alts = {}
         self.checking = True
         self._redraw()
@@ -826,14 +828,19 @@ class BomTab(ttk.Frame):
             for ln in todo:
                 if gen != self._gen:
                     return
-                q = ln.mpn or ln.lcsc
+                # no MPN field, but the Value is a part number (MMBT2222A): look that up instead
+                generic = alternatives.value_part_number(ln)
+                q = ln.mpn or ln.lcsc or generic
                 if name == "LCSC" and ln.lcsc:
                     q = ln.lcsc
                 res, best = [], None
                 try:
                     if q:
-                        res = prov.search(q, limit=10)
-                        if q == ln.lcsc:
+                        res = prov.search(q, limit=20 if generic else 10)
+                        if generic:
+                            pick = alternatives.generic_pick(ln, res, needs[id(ln)])
+                            best = pick.part if pick else None
+                        elif q == ln.lcsc:
                             best = next((r for r in res if r.supplier_pn == ln.lcsc), None)
                         else:
                             best = providers.best_match(res, q)
