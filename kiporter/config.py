@@ -19,7 +19,7 @@ APP_NAME = "Kiporter"
 KEYRING_SERVICE = "Kiporter"
 _OLD_KEYRING_SERVICE = "KiCadPartImporter"
 SECRET_FIELDS = ("digikey_client_secret", "mouser_api_key", "element14_api_key",
-                 "tme_token", "tme_app_secret", "nexar_client_secret")
+                 "tme_token", "tme_app_secret", "nexar_client_secret", "cse_password")
 
 
 def app_data_dir() -> Path:
@@ -82,6 +82,12 @@ class Settings:
     tme_currency: str = "USD"
     nexar_client_id: str = ""
     nexar_client_secret: str = ""
+    # ---- CAD model sources
+    cse_username: str = ""  # Component Search Engine (SamacSys) account
+    cse_password: str = ""
+    cad_source: str = "auto"  # "auto" or one of cad_sources.SOURCES
+    cad_order: list = field(default_factory=lambda: ["EasyEDA", "SamacSys", "Octopart", "SnapEDA"])
+    cad_disabled: list = field(default_factory=list)  # CAD sources switched off (for non-LCSC parts)
     # ---- search
     use_lcsc: bool = True
     use_digikey: bool = True

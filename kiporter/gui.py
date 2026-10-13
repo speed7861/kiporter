@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import queue
+import re
 import threading
 import time
 import traceback
@@ -13,7 +14,7 @@ from tkinter import filedialog, messagebox, simpledialog
 import tkinter as tk
 from tkinter import ttk
 
-from . import __version__, cad, fields, importers, kicad_control, kicad_env, library, providers, render, sexpr, ui
+from . import __version__, cad, cad_sources, fields, importers, kicad_control, kicad_env, library, providers, render, sexpr, ui
 from .config import Settings, app_data_dir
 from .providers import PartResult
 
@@ -26,7 +27,7 @@ COLUMNS = {
     "mpn": ("MPN", 130, lambda r: r.mpn.lower()),
     "mfr": ("Manufacturer", 115, lambda r: r.manufacturer.lower()),
     "package": ("Package", 80, lambda r: r.package.lower()),
-    "cad": ("CAD (EasyEDA)", 100, lambda r: cad.score(r)),
+    "cad": ("CAD", 100, lambda r: cad.score(r)),
     "stock": ("In stock", 78, lambda r: r.stock if r.stock is not None else -1),
     "lead": ("Lead time", 66, lambda r: r.lead_days if r.lead_days is not None else 10 ** 6),
     "price": ("Price", 60, lambda r: r.price if r.price is not None else 10 ** 9),
@@ -216,6 +217,13 @@ class App(tk.Tk):
                                             if k == self.settings.cad_filter), 0))
         self.cad_filter_combo.pack(side="left", padx=4)
         self.cad_filter_combo.bind("<<ComboboxSelected>>", lambda e: self._cad_filter_changed())
+        ttk.Label(srcs, text="   CAD for other suppliers:").pack(side="left")
+        self.cad_src_combo = ttk.Combobox(srcs, state="readonly", width=16,
+                                          values=["Auto (your order)"] + cad_sources.SOURCES)
+        self.cad_src_combo.set(self.settings.cad_source if self.settings.cad_source in cad_sources.SOURCES
+                               else "Auto (your order)")
+        self.cad_src_combo.pack(side="left", padx=4)
+        self.cad_src_combo.bind("<<ComboboxSelected>>", lambda e: self._cad_source_changed())
         self.in_stock_var = tk.BooleanVar(value=self.settings.in_stock_only)
         ttk.Checkbutton(srcs, text="In stock only", variable=self.in_stock_var,
                         command=self._sources_changed).pack(side="left", padx=(8, 0))
@@ -247,6 +255,16 @@ class App(tk.Tk):
 
         right = ttk.Frame(pw)
         from .preview_gui import PreviewPane
+        mrow = ttk.Frame(right)
+        mrow.pack(fill="x", padx=2, pady=(0, 3))
+        ttk.Label(mrow, text="Model from:").pack(side="left")
+        self.model_combo = ttk.Combobox(mrow, state="readonly", width=52)
+        self.model_combo.pack(side="left", padx=4, fill="x", expand=True)
+        self.model_combo.bind("<<ComboboxSelected>>", lambda e: self._model_picked())
+        self.model_status = tk.StringVar()
+        ttk.Label(mrow, textvariable=self.model_status, style="Muted.TLabel").pack(side="left", padx=4)
+        self._hits: list = []
+        self._hit = None
         self.preview = PreviewPane(right, on_3d_requested=self._render_3d)
         self.preview.pack(fill="both", expand=True, padx=2)
         links = ttk.Frame(right)
@@ -662,7 +680,8 @@ class App(tk.Tk):
             iid = f"r{len(self.results)}"
             self.results[iid] = r
             tags = (r.source,) if r.stock else (r.source, "nostock")
-            cad.fill_known(r)  # from the cache - no network
+            if r.source == "LCSC" or self.settings.cad_source in ("auto", "EasyEDA"):
+                cad.fill_known(r)  # from the cache - no network
             self.tree.insert("", "end", iid=iid, tags=tags, values=self._row_values(r))
         if self.settings.check_cad_all or self.settings.cad_filter != "any":
             self._queue_cad_checks()
@@ -690,7 +709,7 @@ class App(tk.Tk):
             return
         if not cad.blocked_for():
             try:
-                cad.check(r)
+                cad_sources.check_availability(r, self.settings)
             except cad.EasyedaBlocked:
                 self.tlog("EasyEDA is blocking requests for a few minutes - CAD checks paused.")
             except Exception as e:  # noqa: BLE001
@@ -727,6 +746,23 @@ class App(tk.Tk):
             j = idx.index(col)
             longest = max([f.measure(str(r[j])) for r in rows if len(r) > j] + [f.measure(COLUMNS[col][0]) + 18])
             self.tree.column(col, width=min(longest + 18, cap), stretch=False)
+
+    def _cad_source_changed(self) -> None:
+        v = self.cad_src_combo.get()
+        self.settings.cad_source = v if v in cad_sources.SOURCES else "auto"
+        self.settings.save()
+        for r in self.results.values():
+            if r.source == "LCSC":
+                continue  # LCSC parts always use their own EasyEDA model
+            r.cad, r.cad_source = None, ""
+            if self.settings.cad_source in ("auto", "EasyEDA"):
+                cad.fill_known(r)
+            self._refresh_row(r)
+        if self.settings.cad_filter != "any" or self.settings.check_cad_all:
+            self._cad_queued.clear()
+            self._queue_cad_checks()
+        self._apply_sort()
+        self._selection_changed()
 
     def _cad_filter_changed(self) -> None:
         self.settings.cad_filter = CAD_FILTERS[max(self.cad_filter_combo.current(), 0)][0]
@@ -775,90 +811,154 @@ class App(tk.Tk):
         sel = self.tree.selection()
         return self.results.get(sel[0]) if sel else None
 
-    # ================================================================ preview
+    # ================================================================ preview / CAD sources
     def _selection_changed(self) -> None:
         r = self.selected_part()
         self._preview_token += 1
         token = self._preview_token
         self._preview_part = None
+        self._hits, self._hit = [], None
+        self.model_combo.configure(values=[])
+        self.model_combo.set("")
         if not r:
             return
         self._show_details(r)
         self.preview.set_photo(None, "Loading photo…" if r.image_url and self.settings.show_images
                                else "No photo available")
-        msg = "Loading preview…" if self.settings.auto_preview else "Preview off (Settings → Search)"
+        msg = "Looking for CAD models…" if self.settings.auto_preview else "Preview off (Settings → Search)"
+        self.model_status.set(msg)
         self.preview.set_symbol(None, None, msg)
         self.preview.set_footprint(None, msg)
-        self.preview.set_3d(None, "The 3D view appears here once the part's CAD data has loaded" if
+        self.preview.set_3d(None, "The 3D view appears here once the model has loaded" if
                             self.settings.preview_3d else "3D preview off (Settings → Search)")
         # debounce: only load if the user stays on this row
         self.after(250, lambda: self._load_preview(token, r))
 
-    def _load_preview(self, token: int, r: PartResult, attempt: int = 0) -> None:
+    def _load_preview(self, token: int, r: PartResult) -> None:
         if token != self._preview_token:
             return
-        if self.settings.show_images and r.image_url and attempt == 0:
+        if self.settings.show_images and r.image_url:
             self.run_bg(lambda: cad.image_bytes(r.image_url),
                         lambda data: token == self._preview_token and self.preview.set_photo(
                             data, "No photo available"))
         if not self.settings.auto_preview:
             return
+        # ask every usable source in parallel; show results as they arrive
+        self._user_picked = False
+        srcs = [x for x in cad_sources.order(self.settings, r) if cad_sources.usable(x, self.settings)]
+        self._pending_sources = set(srcs)
+        for src in srcs:
+            self.run_bg(lambda src=src: cad_sources.find(src, r, self.settings),
+                        lambda hits, src=src: self._source_found(token, r, src, hits),
+                        lambda e, src=src: self._source_found(token, r, src, [], e))
 
-        def work():
-            lcsc = cad.lcsc_for(r)
-            if not lcsc:
-                return None
-            return lcsc, cad.staged(lcsc)
+    def _rank(self, h) -> tuple:
+        r = self.selected_part()
+        order = cad_sources.order(self.settings, r)
+        forced = self.settings.cad_source if not (r and r.source == "LCSC") else "auto"
+        return (forced != "auto" and h.source != forced, h.browser_only or not (h.sym and h.fp),
+                order.index(h.source) if h.source in order else 99)
 
-        def done(res):
-            if token != self._preview_token:
-                return
-            if not res:
-                msg = (f"No free EasyEDA model found for {r.mpn}.\nUse 'Find CAD elsewhere…' "
-                       "for SnapEDA / Ultra Librarian / SamacSys.")
+    def _source_found(self, token: int, r: PartResult, src: str, hits: list, err=None) -> None:
+        if token != self._preview_token:
+            return
+        self._pending_sources.discard(src)
+        if err is not None:
+            self.log(f"{src}: {err}")
+        self._hits = sorted(self._hits + list(hits), key=self._rank)
+        self.model_combo["values"] = [h.label for h in self._hits]
+        waiting = ", ".join(x for x in cad_sources.order(self.settings, r) if x in self._pending_sources)
+        self.model_status.set(f"still asking {waiting}…" if waiting else f"{len(self._hits)} source(s)")
+        if self._hit is not None:
+            self.model_combo.current(self._hits.index(self._hit))
+        if not self._hits:
+            if not self._pending_sources:
+                tried = ", ".join(x for x in cad_sources.order(self.settings, r) if cad_sources.usable(x, self.settings))
+                msg = (f"No CAD model found for {r.mpn} ({tried}).\n"
+                       + (cad.blocked_message() if cad.blocked_for() else "Try 'Find CAD elsewhere…'."))
+                self.model_status.set("No CAD model found")
                 self.preview.set_symbol(None, None, msg)
                 self.preview.set_footprint(None, msg)
                 self.preview.set_3d(None, msg)
+            return
+        best = self._hits[0]
+        if self._hit is None or (not self._user_picked and self._rank(best) < self._rank(self._hit)):
+            self.model_combo.current(0)
+            if not best.browser_only:
+                r.cad, r.cad_source = best.avail, best.source
+                if best.source == "EasyEDA":
+                    r.cad_lcsc = best.ref
+                self._refresh_row(r)
+            self._show_hit(token, r, best)
+
+    def _model_picked(self) -> None:
+        r = self.selected_part()
+        i = self.model_combo.current()
+        self._user_picked = True
+        if r and 0 <= i < len(self._hits):
+            self._show_hit(self._preview_token, r, self._hits[i])
+
+    def _refresh_row(self, r: PartResult) -> None:
+        iid = next((i for i, x in self.results.items() if x is r), None)
+        if iid and self.tree.exists(iid):
+            self.tree.set(iid, "cad", cad.label(r))
+            self.tree.set(iid, "package", r.package)
+
+    def _show_hit(self, token: int, r: PartResult, h) -> None:
+        self._hit = h
+        self._preview_part = None
+        self._show_details(r)
+        if h.browser_only:
+            msg = (f"{h.source} models download in your browser ({h.detail}).\nClick 'Import selected part' to open "
+                   f"it - the zip you save is imported automatically.")
+            self.preview.set_symbol(None, None, msg)
+            self.preview.set_footprint(None, msg)
+            self.preview.set_3d(None, msg)
+            return
+        loading = f"Loading the {h.source} model…"
+        self.preview.set_symbol(None, None, loading)
+        self.preview.set_footprint(None, loading)
+
+        def done(part):
+            if token != self._preview_token or self._hit is not h:
                 return
-            lcsc, part = res
-            self._preview_part = (token, lcsc, part)
-            cad.fill_known(r)  # the download also told us what CAD exists
-            iid = next((i for i, x in self.results.items() if x is r), None)
-            if iid and self.tree.exists(iid):
-                self.tree.set(iid, "cad", cad.label(r))
-                self.tree.set(iid, "package", r.package)
-            self._show_details(r)
+            key = f"{h.source}_{re.sub(r'[^A-Za-z0-9]+', '_', h.ref)[-60:]}"
+            self._preview_part = (token, key, part)
             try:
-                lib = sexpr.parse(part.symbol_files[0].read_text(encoding="utf-8")) if part.symbol_files else None
+                lib = sexpr.parse(part.symbol_files[0].read_text(encoding="utf-8", errors="replace")) \
+                    if part.symbol_files else None
                 names = render.symbol_names(lib) if lib else []
-                self.preview.set_symbol(lib, names[0] if names else None, "No symbol")
-                fpn = sexpr.parse(part.footprint_files[0].read_text(encoding="utf-8")) if part.footprint_files else None
-                self.preview.set_footprint(fpn, "No footprint")
+                self.preview.set_symbol(lib, names[0] if names else None, "This model has no symbol")
+                fpn = sexpr.parse(part.footprint_files[0].read_text(encoding="utf-8", errors="replace")) \
+                    if part.footprint_files else None
+                self.preview.set_footprint(fpn, "This model has no footprint")
             except (ValueError, OSError) as e:
                 self.preview.set_symbol(None, None, f"Preview failed: {e}")
             if self.preview.current_tab() == "3D":
                 self._render_3d()
 
         def fail(e):
-            if token != self._preview_token:
+            if token != self._preview_token or self._hit is not h:
                 return
-            msg = str(e) if isinstance(e, (cad.EasyedaBlocked, RuntimeError)) else f"Preview failed: {e}"
+            msg = str(e)
+            if isinstance(e, cad_sources.NeedsBrowser):
+                msg += "\nClick 'Import selected part' to open it in your browser - the zip is imported automatically."
             self.preview.set_symbol(None, None, msg)
             self.preview.set_footprint(None, msg)
             self.preview.set_3d(None, msg)
             self._update_count_status()
-        self.run_bg(work, done, fail)
+        self.run_bg(lambda: cad_sources.fetch(h, self.settings, self.ki), done, fail)
 
     def _render_3d(self) -> None:
         if not self.settings.preview_3d or not self._preview_part:
             return
-        token, lcsc, part = self._preview_part
+        token, key, part = self._preview_part
         if token != self._preview_token:
             return
         if not part.footprint_files or not part.model_files:
-            self.preview.set_3d(None, "No 3D model available for this part")
+            self.preview.set_3d(None, "This model has no 3D model")
             return
-        out = cad.preview_dir() / f"{lcsc}.png"
+        out = cad.preview_dir() / f"{key}.png"
         if out.exists():
             self.preview.set_3d(out)
             return
@@ -867,19 +967,25 @@ class App(tk.Tk):
                     lambda png: token == self._preview_token and self.preview.set_3d(png),
                     lambda e: token == self._preview_token and self.preview.set_3d(None, f"3D preview: {e}"))
 
-    @staticmethod
-    def _cad_text(r: PartResult) -> tuple[str, str | None, str]:
-        if r.cad is None:
-            return "checking…", "muted", ""
-        s, f, m = r.cad
+    def _cad_text(self, r: PartResult) -> tuple[str, str | None, str]:
+        h = self._hit if self._hit is not None and r is self.selected_part() else None
+        avail = h.avail if h and not h.browser_only else r.cad
+        if avail is None:
+            return ("browser download" if h else "checking…"), "muted", (h.detail if h else "")
+        s, f, m = avail
         marks = "   ".join(("✔ " if ok else "✖ ") + n for n, ok in
                            (("Symbol", s), ("Footprint", f), ("3D model", m)))
-        if r.cad_lcsc and (s or f):
-            src = (f"EasyEDA (LCSC part {r.cad_lcsc})" if r.source == "LCSC" else
-                   f"EasyEDA, via LCSC part {r.cad_lcsc} with the same MPN. {r.source} does not supply CAD "
-                   "files - use 'Find CAD elsewhere' for its SamacSys / Ultra Librarian model.")
+        src_name = h.source if h else r.cad_source
+        if src_name == "EasyEDA":
+            lcsc = h.ref if h else r.cad_lcsc
+            src = (f"EasyEDA (LCSC part {lcsc})" if r.source == "LCSC" else
+                   f"EasyEDA, via LCSC part {lcsc} with the same MPN ({r.source} does not supply CAD files)")
+        elif src_name == "SamacSys":
+            src = f"SamacSys / Component Search Engine - the models Mouser links to ({h.detail if h else ''})"
+        elif src_name:
+            src = f"{src_name} ({h.detail})" if h else src_name
         else:
-            src = "Not at EasyEDA - use 'Find CAD elsewhere' (SnapEDA / Ultra Librarian / SamacSys)."
+            src = "none found - try another source in 'Model from' or 'Find CAD elsewhere'"
         return marks, "good" if s and f else "bad", src
 
     @staticmethod
@@ -931,32 +1037,51 @@ class App(tk.Tk):
         target = self.current_target()
         if not target:
             return
-        if r.source == "LCSC":
-            self._import_lcsc(r, r.supplier_pn, r.part_data(), target)
+        if self._hit is not None:
+            self._import_hit(r, self._hit, target)
             return
-        self.set_status(f"Looking for {r.mpn} at LCSC/EasyEDA…")
+        self.set_status(f"Looking for CAD models for {r.mpn}…")
 
-        def found(lcsc: str):
-            if lcsc and messagebox.askyesno(
-                    APP_TITLE, f"Free CAD model found at LCSC/EasyEDA for {r.mpn}:  {lcsc}  ({cad.label(r)})\n\n"
-                               f"Import it with your {r.source} part data?\n\nChoose 'No' to download CAD from "
-                               "SnapEDA / Ultra Librarian / SamacSys instead."):
-                data = {**r.part_data(), "lcsc": lcsc}
-                self._import_lcsc(r, lcsc, data, target)
+        def found(hits):
+            h = cad_sources.best(hits, self.settings.cad_source)
+            if h:
+                self._import_hit(r, h, target)
             else:
-                if not lcsc:
-                    self.log(f"No LCSC/EasyEDA model for {r.mpn}.")
+                self.log(f"No CAD model found for {r.mpn}.")
                 self.find_cad_elsewhere(r)
+        self.run_bg(lambda: cad_sources.find_all(r, self.settings, self.tlog), found, self._import_failed)
 
-        self.run_bg(lambda: cad.lcsc_for(r), found)
-
-    def _import_lcsc(self, r: PartResult, lcsc_id: str, data: dict, target: library.LibraryTarget) -> None:
-        self.set_status(f"Importing {lcsc_id} ({r.mpn}) into {target.name}…")
-        self.log(f"Importing EasyEDA CAD data for {lcsc_id} ({r.mpn})…")
+    def _import_hit(self, r: PartResult, h, target: library.LibraryTarget) -> None:
+        data = r.part_data()
+        if h.source == "EasyEDA":
+            data["lcsc"] = h.ref
+        if h.browser_only:
+            self._open_for_download(r, h.page or h.ref, h.source)
+            return
+        self.set_status(f"Importing the {h.source} model of {r.mpn} into {target.name}…")
+        self.log(f"Importing {r.mpn} from {h.source} ({h.detail})…")
         opts = self._install_opts()
-        self.run_bg(lambda: library.install(target, cad.staged(lcsc_id, data), **opts),
-                    lambda res: self._import_done(res, target, r.mpn),
-                    lambda e: self._import_failed(e))
+
+        def fail(e):
+            if isinstance(e, cad_sources.NeedsBrowser):
+                self._open_for_download(r, e.url, h.source)
+            elif isinstance(e, cad_sources.NeedsLogin):
+                if messagebox.askyesno(APP_TITLE, f"{e}\n\nOpen Settings → CAD sources now?"):
+                    self.open_settings("CAD sources")
+            else:
+                self._import_failed(e)
+        self.run_bg(lambda: library.install(target, cad_sources.fetch(h, self.settings, self.ki, data), **opts),
+                    lambda res: self._import_done(res, target, r.mpn), fail)
+
+    def _open_for_download(self, r: PartResult, url: str, source: str) -> None:
+        webbrowser.open(url)
+        self._pending_cad_part = (r, time.time())
+        if not self.watch_var.get():
+            self.watch_var.set(True)
+            self._watch_toggled()
+        self.log(f"Opened {source} in your browser - the KiCad zip you download to {self.settings.watch_dir} "
+                 f"is imported automatically with {r.mpn}'s part data.")
+        self.set_status(f"Download the KiCad model of {r.mpn} from {source}; Kiporter imports it automatically.")
 
     def _install_opts(self) -> dict:
         return dict(overwrite=self.overwrite.get(), want_symbol=self.want_sym.get(),

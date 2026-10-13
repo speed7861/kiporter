@@ -45,10 +45,24 @@ configuration.
   You can show only parts with a **symbol + footprint**, or **symbol + footprint + 3D model**.
 - **Previews:** part photo, the **symbol** and **footprint** drawn in the app, and a **3D render**
   produced by KiCad itself.
-- **One-click import:**
-  - LCSC parts are converted from EasyEDA.
-  - For other suppliers, Kiporter matches the MPN to LCSC. If there's no match, it opens
-    SnapEDA / Ultra Librarian / SamacSys and **auto-imports the ZIP you download**.
+- **One-click import** of the model shown in the preview. If a model can only be downloaded
+  in your browser, Kiporter opens the page and **auto-imports the ZIP you download**.
+- **Choose where CAD models come from.** Suppliers' APIs (Digi-Key, Mouser, …) sell parts but
+  don't hand out CAD files, so Kiporter gets models from CAD libraries:
+
+  | Source | Account needed |
+  |---|---|
+  | **EasyEDA** (LCSC's library) | none |
+  | **SamacSys / Component Search Engine** (the models Mouser links to) | none to search; a free account to download |
+  | **Octopart** (lists SnapEDA, Ultra Librarian and other models) | your Octopart/Nexar keys |
+  | **SnapEDA** | through Octopart, or opened in your browser |
+
+  LCSC parts always use their own EasyEDA model. For every other supplier you choose:
+  - which sources are used, and in what order (Settings → CAD sources);
+  - a default under **CAD for other suppliers**;
+  - per part, the **Model from** list above the preview, to compare and pick.
+
+  Lookups are cached on disk and paced, so free services aren't overloaded.
 - **Consistent symbol fields across all sources:** Manufacturer, MPN, Package, Datasheet,
   Description and each supplier's part number. Vendor spellings such as `MFGR` or
   `Manufacturer_Name` are folded into these names.

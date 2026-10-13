@@ -59,6 +59,7 @@ class PartResult:
     # CAD availability (filled in the background): (symbol, footprint, 3D model) and the LCSC part used
     cad: tuple | None = None
     cad_lcsc: str = ""
+    cad_source: str = ""  # which CAD source the availability came from
 
     def __post_init__(self) -> None:
         # one package spelling for every supplier: "8-SOIC (0.154\", 3.90mm)" -> "SOIC-8"

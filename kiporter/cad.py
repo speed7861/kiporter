@@ -215,6 +215,7 @@ def fill_known(r: PartResult) -> None:
     cached = cached_availability(lcsc)
     if cached is not None:
         r.cad = cached
+        r.cad_source = "EasyEDA"
     if not r.package:
         r.package = _equiv_pkg.get(r.mpn.strip().upper(), "")
 
@@ -242,7 +243,9 @@ def label(r: PartResult) -> str:
         return "?"
     s, f, m = r.cad
     parts = [n for n, ok in (("Sym", s), ("Fp", f), ("3D", m)) if ok]
-    return "+".join(parts) if parts else "—"
+    if not parts:
+        return "—"
+    return "+".join(parts) + (f"  · {r.cad_source}" if r.cad_source else "")
 
 
 # ---------------------------------------------------------------- converted parts (kept on disk)

@@ -208,6 +208,7 @@ class SettingsTab(ttk.Frame):
         self.suppliers = SuppliersPanel(self._page("Suppliers", padding=4), app)
         self.suppliers.pack(fill="both", expand=True)
         ttk.Label(self.pages["Suppliers"], text=self.suppliers.note, style="Muted.TLabel").pack(anchor="w")
+        self._page_cad_sources()
         self._page_kicad()
         self._page_bom()
         self._page_about()
@@ -346,6 +347,94 @@ class SettingsTab(ttk.Frame):
         ttk.Button(p, text="Clear CAD cache", command=self._clear_cache).grid(row=r, column=0, sticky="w",
                                                                               padx=14, pady=10)
 
+    def _page_cad_sources(self) -> None:
+        from . import cad_sources
+        p = self._page("CAD sources")
+        self.note(p, "Where symbols, footprints and 3D models come from. 'Auto' (Search tab → CAD from) tries the "
+                     "sources in this order; the 'Model from' list above the preview lets you switch per part.")
+        self.note(p, "LCSC parts always use their own EasyEDA model. These settings are for parts from Digi-Key, "
+                     "Mouser, Farnell/Newark, TME and Octopart.")
+        self.section(p, "Sources to use, in order (Auto tries them top to bottom)")
+        self.order_vars: list[tk.StringVar] = []
+        self.use_vars: dict[str, tk.BooleanVar] = {}
+        for i in range(len(cad_sources.SOURCES)):
+            r = self._next(p)
+            ttk.Label(p, text=f"{i + 1}.").grid(row=r, column=0, sticky="e", padx=(14, 8))
+            v = tk.StringVar()
+            v.trace_add("write", lambda *a: self.dirty.set("● unsaved changes"))
+            ttk.Combobox(p, textvariable=v, values=cad_sources.SOURCES, state="readonly", width=16).grid(
+                row=r, column=1, sticky="w", pady=1)
+            self.order_vars.append(v)
+        r = self._next(p)
+        uf = ttk.Frame(p)
+        uf.grid(row=r, column=1, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(uf, text="Use:").pack(side="left")
+        for name in cad_sources.SOURCES:
+            bv = tk.BooleanVar(value=True)
+            bv.trace_add("write", lambda *a: self.dirty.set("● unsaved changes"))
+            ttk.Checkbutton(uf, text=name, variable=bv).pack(side="left", padx=6)
+            self.use_vars[name] = bv
+        self.section(p, "SamacSys / Component Search Engine (the models Mouser and RS link to)")
+        self.note(p, "Finding SamacSys models needs no account. Downloading them needs a free Component Search "
+                     "Engine account - the same login as SamacSys Library Loader. Sign up, then enter it here "
+                     "and press Enter.")
+        self.cse_user = tk.StringVar()
+        self.cse_pass = tk.StringVar()
+        r = self._next(p)
+        ttk.Label(p, text="Username / e-mail").grid(row=r, column=0, sticky="w", padx=(14, 8))
+        e1 = ttk.Entry(p, textvariable=self.cse_user, width=40)
+        e1.grid(row=r, column=1, sticky="w")
+        r = self._next(p)
+        ttk.Label(p, text="Password").grid(row=r, column=0, sticky="w", padx=(14, 8))
+        e2 = ttk.Entry(p, textvariable=self.cse_pass, width=40, show="•")
+        e2.grid(row=r, column=1, sticky="w")
+        bf = ttk.Frame(p)
+        bf.grid(row=r, column=2, sticky="w", padx=6)
+        ttk.Button(bf, text="Enter", style="Accent.TButton", command=self._cse_enter).pack(side="left")
+        ttk.Button(bf, text="Create free account…",
+                   command=lambda: webbrowser.open(cad_sources.CSE_SIGNUP)).pack(side="left", padx=6)
+        for e in (e1, e2):
+            e.bind("<Return>", lambda ev: self._cse_enter())
+        r = self._next(p)
+        self.cse_status = tk.StringVar()
+        self.cse_status_label = ttk.Label(p, textvariable=self.cse_status)
+        self.cse_status_label.grid(row=r, column=1, columnspan=2, sticky="w")
+        self.cse_user.trace_add("write", lambda *a: self._cse_typed())
+        self.cse_pass.trace_add("write", lambda *a: self._cse_typed())
+        self.section(p, "Octopart")
+        self.note(p, "Uses the Octopart (Nexar) keys from the Suppliers page. Octopart lists the CAD models it knows "
+                     "for a part (SnapEDA, Ultra Librarian, SamacSys, ...) with KiCad download links; models that "
+                     "need a sign-in open in your browser and the downloaded zip is imported automatically.")
+        self.section(p, "SnapEDA")
+        self.note(p, "SnapEDA has no public download API. With Octopart keys, SnapEDA models are found through "
+                     "Octopart; otherwise Kiporter opens the part on snapeda.com (sign in there), and the KiCad zip "
+                     "you download is imported automatically.")
+
+    def _cse_typed(self) -> None:
+        ok = self.cse_user.get().strip() and self.cse_pass.get().strip()
+        self.cse_status.set("Press Enter to save and check the login" if ok else "Not signed in")
+        self.cse_status_label.configure(style="Busy.TLabel" if ok else "Bad.TLabel")
+
+    def _cse_enter(self) -> None:
+        from . import cad_sources
+        s = self.app.settings
+        s.cse_username, s.cse_password = self.cse_user.get().strip(), self.cse_pass.get().strip()
+        s.save()
+        if not (s.cse_username and s.cse_password):
+            self._cse_typed()
+            return
+        self.cse_status.set("Checking the login…")
+        self.cse_status_label.configure(style="Busy.TLabel")
+
+        def ok(msg):
+            self.cse_status.set("✔ Signed in - " + msg)
+            self.cse_status_label.configure(style="Good.TLabel")
+
+        def bad(e):
+            self.cse_status.set("✖ " + str(e)[:140])
+            self.cse_status_label.configure(style="Bad.TLabel")
+        self.app.run_bg(lambda: cad_sources.cse_test_login(s), ok, bad)
+
     def _page_kicad(self) -> None:
         p = self._page("KiCad")
         installs = kicad_env.find_installs(self.app.settings.kicad_cli_path)
@@ -404,6 +493,20 @@ class SettingsTab(ttk.Frame):
 
     # ---------------------------------------------------------------- load / save
     def load_from(self, s: Settings) -> None:
+        from . import cad_sources
+        full = [x for x in (s.cad_order or []) if x in cad_sources.SOURCES]
+        full += [x for x in cad_sources.SOURCES if x not in full]
+        for v, name in zip(self.order_vars, full):
+            v.set(name)
+        for name, bv in self.use_vars.items():
+            bv.set(name not in (s.cad_disabled or []))
+        self.cse_user.set(s.cse_username)
+        self.cse_pass.set(s.cse_password)
+        if s.cse_username and s.cse_password:
+            self.cse_status.set("✔ Login saved (press Enter to check it)")
+            self.cse_status_label.configure(style="Good.TLabel")
+        else:
+            self._cse_typed()
         maps = getattr(self, "_choice_maps", {})
         for attr, v in self.vars.items():
             val = getattr(s, attr)
@@ -442,6 +545,10 @@ class SettingsTab(ttk.Frame):
         s.field_names = {k: v.get().strip() for k, v in self.field_vars.items()
                          if v.get().strip() and v.get().strip() != fields.DEFAULT_FIELD_NAMES[k]}
         self.suppliers.apply()
+        order = [v.get() for v in self.order_vars if v.get()]
+        s.cad_order = list(dict.fromkeys(order))
+        s.cad_disabled = [n for n, bv in self.use_vars.items() if not bv.get()]
+        s.cse_username, s.cse_password = self.cse_user.get().strip(), self.cse_pass.get().strip()
         s.save()
         self.app.apply_settings()
         self.load_from(s)
