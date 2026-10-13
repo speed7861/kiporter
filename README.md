@@ -208,6 +208,9 @@ Click **Save** when you're done.
   same value and package with the same dielectric, at least the same voltage and the same or
   better tolerance. A part LCSC has enough of is never replaced.
   **Use suggested LCSC part** switches BOM lines to the suggestion (right-click to switch back).
+- **Descriptions from LCSC:** lines that have an LCSC number but no description in the schematic
+  get a readable one from LCSC (category plus main specs). **Save to schematic** writes them into
+  symbols that have none; descriptions you wrote yourself are never replaced.
 - **Find alternatives:** for any BOM line, lists the closest in-stock LCSC parts from the same
   category, compared spec by spec (pin layout, pitch, mounting, value, ratings). Each row shows a
   match percentage and what differs. **Check footprint fit** tells you whether a part's pins and

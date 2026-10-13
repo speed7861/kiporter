@@ -774,6 +774,51 @@ class BomTab(ttk.Frame):
         self.info.set(f"{len(lines)} BOM lines, {parts} parts per board ({dnp} DNP lines, {no_mpn} without "
                       "MPN/LCSC number). Double-click a line to search for it.")
         self._redraw()
+        self._fetch_descriptions()
+
+    @staticmethod
+    def _pull_description(ln: bom.BomLine, part) -> None:
+        """Use LCSC's description for a line the schematic gives none for."""
+        if not ln.description.strip() and part is not None:
+            text = providers.tidy_description(part)
+            if text:
+                ln.description, ln.pulled_description = text, True
+
+    def _fetch_descriptions(self) -> None:
+        """LCSC parts without a description in the schematic: look theirs up in the background."""
+        todo = [l for l in self.lines if l.lcsc and not l.description.strip()]
+        if not todo:
+            return
+        lines_now = self.lines
+        self.app._busy += 1
+
+        def work():
+            lcsc = self.app.providers["LCSC"]
+            for ln in todo:
+                if self.lines is not lines_now:
+                    break
+                try:
+                    hit = next((r for r in lcsc.search(ln.lcsc, limit=10) if r.supplier_pn == ln.lcsc), None)
+                    self._pull_description(ln, hit)
+                    if ln.pulled_description:
+                        self.app.post(self._show_description, lines_now, ln)
+                except Exception as e:  # noqa: BLE001
+                    self.app.tlog(f"Description for {ln.lcsc}: {e}")
+                time.sleep(0.3)
+            self.app.post(done)
+
+        def done():
+            self.app._busy = max(0, self.app._busy - 1)
+            n = sum(1 for l in todo if l.pulled_description)
+            if n and self.lines is lines_now and not self.checking:
+                self.info.set(self.info.get() + f" Pulled {n} missing descriptions from LCSC.")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_description(self, lines_now, ln: bom.BomLine) -> None:
+        if self.lines is lines_now and ln in self.lines:
+            iid = str(self.lines.index(ln))
+            if self.tree.exists(iid):
+                self.tree.set(iid, "desc", ln.description)
 
     def visible_lines(self) -> list[bom.BomLine]:
         return [l for l in self.lines if self.show_dnp.get() or not l.dnp]
@@ -898,6 +943,8 @@ class BomTab(ttk.Frame):
                             best = providers.best_match(res, q)
                         if shown:
                             ln.offers[name] = best or "not found"
+                        if name == "LCSC" and best is not None:
+                            self._pull_description(ln, best)
                 except Exception as e:  # noqa: BLE001
                     if shown:
                         ln.offers[name] = "error"
@@ -972,9 +1019,10 @@ class BomTab(ttk.Frame):
     def save_to_schematic(self) -> None:
         """Write the switched parts into the fields of the symbols already in the schematic."""
         p = self.app.current_project()
-        lines = [l for l in self.lines if l.original is not None]
+        lines = [l for l in self.lines if l.original is not None or l.pulled_description]
         if not p or not lines:
-            messagebox.showinfo(APP_TITLE, "Nothing to save yet. Use 'Use suggested LCSC part' first.")
+            messagebox.showinfo(APP_TITLE, "Nothing to save yet. Use 'Use suggested LCSC part' first, or load a BOM "
+                                           "whose LCSC parts have no description.")
             return
         if any("Schematic Editor" in t and p.name in t for _, t in kicad_env.kicad_window_titles()):
             messagebox.showwarning(
@@ -984,12 +1032,18 @@ class BomTab(ttk.Frame):
             return
         updates: dict[str, dict[str, str]] = {}
         for ln in lines:
-            old = ln.original[0]
-            data = {"lcsc": ln.lcsc}
-            if ln.mpn != old.get("mpn", ""):  # a different part: its number and maker go in too
-                data.update(mpn=ln.mpn, manufacturer=ln.manufacturer)
-            if ln.value != ln.original[2]:  # the Value was the old part number
-                data["value"] = ln.value
+            data: dict[str, str] = {}
+            if ln.original is not None:
+                old = ln.original[0]
+                data["lcsc"] = ln.lcsc
+                if ln.mpn != old.get("mpn", ""):  # a different part: its number and maker go in too
+                    data.update(mpn=ln.mpn, manufacturer=ln.manufacturer)
+                    if ln.pulled_description:
+                        data["description"] = ln.description  # and its description replaces the old part's
+                if ln.value != ln.original[2]:  # the Value was the old part number
+                    data["value"] = ln.value
+            if ln.pulled_description and "description" not in data:
+                data["description?"] = ln.description  # only where the symbol has none
             for ref in ln.refs:
                 updates[ref] = data
         sch = p.pro_file.with_suffix(".kicad_sch")
@@ -1003,8 +1057,8 @@ class BomTab(ttk.Frame):
             messagebox.showinfo(APP_TITLE, "The schematic already has these part numbers.")
             return
         if not messagebox.askyesno(
-                APP_TITLE, f"Write the part numbers of {len(lines)} BOM line(s) into {count} symbol(s) in the "
-                           f"schematic?\n\nOnly the fields change ({names['lcsc']}"
+                APP_TITLE, f"Write the part data of {len(lines)} BOM line(s) into {count} symbol(s) in the "
+                           f"schematic?\n\nOnly the fields change (missing descriptions, {names['lcsc']}"
                            + (f", {names['mpn']}, {names['manufacturer']}" if any(len(u) > 1 for u in updates.values())
                               else "")
                            + (", and the Value where it was the old part number"
@@ -1020,6 +1074,7 @@ class BomTab(ttk.Frame):
             return
         for ln in lines:
             ln.original = None  # now the schematic's own data
+            ln.pulled_description = False
             ln.alts = {}
         self._redraw()
         self.app.log(f"Saved part numbers of {len(lines)} BOM lines to {count} schematic symbols. Backup: {backup}")

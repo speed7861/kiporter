@@ -484,3 +484,29 @@ def test_similar_parts_by_specs_and_footprint_fit(tmp_path):
     dup = conn("C9", "26013115", "MOLEX", 3000)
     a = alt.suggest(ln, [ref], 1, lambda kw: [dup] if kw == "26013115" else [ref])
     assert a.exact and a.part.supplier_pn == "C9" and "another LCSC listing" in a.reason
+
+
+def test_lcsc_descriptions_are_tidied_and_only_fill_gaps(tmp_path):
+    from kiporter import fields, schedit
+    from kiporter.providers import PartResult, tidy_description
+    cap = PartResult(source="LCSC", mpn="CC0603KRX7R7BB104", supplier_pn="C108079", package="0603",
+                     category="Multilayer Ceramic Capacitors MLCC - SMD/SMT",
+                     description="100nF 16V X7R ±10% 0603 Multilayer Ceramic Capacitors MLCC - SMD/SMT ROHS",
+                     extra={"Attributes": "Voltage Rating: 16V; Tolerance: ±10%; Capacitance: 100nF; "
+                                          "Temperature Coefficient: X7R; Operating Temperature: -55℃~+125℃"})
+    assert tidy_description(cap) == "Multilayer Ceramic Capacitors MLCC, 100nF, ±10%, 16V, X7R, 0603"
+    assert cap.part_data()["description"] == tidy_description(cap)
+    bare = PartResult(source="LCSC", mpn="X", description="弯插,P=4.2mm Wire To Board Connector ROHS")
+    assert tidy_description(bare) == "P=4.2mm Wire To Board Connector"
+    sch = '''(kicad_sch (version 20250114)
+  (symbol (lib_id "D:C") (at 1 1 0) (property "Reference" "C1" (at 0 0 0)) (property "Datasheet" "~" (at 0 0 0))
+    (property "Description" "" (at 0 0 0)) (uuid "a"))
+  (symbol (lib_id "D:C") (at 2 2 0) (property "Reference" "C2" (at 0 0 0)) (property "Datasheet" "~" (at 0 0 0))
+    (property "DESC" "my own text" (at 0 0 0)) (uuid "b")))'''
+    f = tmp_path / "p.kicad_sch"
+    f.write_text(sch, encoding="utf-8")
+    upd = {"C1": {"description?": "100nF cap"}, "C2": {"description?": "100nF cap"}}
+    count, _, texts = schedit.set_fields(f, upd, fields.field_names())
+    schedit.write(texts)
+    text = f.read_text(encoding="utf-8")
+    assert count == 1 and '"Description" "100nF cap"' in text and '"DESC" "my own text"' in text

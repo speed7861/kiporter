@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
-from .providers import PartResult, _norm_mpn, guess_package
+from .providers import PartResult, _norm_mpn, guess_package, tidy_description
 
 KINDS = {"R": "resistor", "C": "capacitor", "L": "inductor"}
 SAME_PART = 10.0  # score of a suggestion that is the very same manufacturer part number
@@ -354,7 +354,7 @@ def suggest(ln, results: list[PartResult], need: int, search=None) -> Alternativ
 def switch(ln, alt: Alternative) -> None:
     """Make the suggested LCSC part the line's part (kept in ln.original so it can be undone)."""
     if ln.original is None:
-        ln.original = (dict(ln.data), dict(ln.offers), ln.value)
+        ln.original = (dict(ln.data), dict(ln.offers), ln.value, ln.description, ln.pulled_description)
     p = alt.part
     # a Value that is itself the old part number (MMBT2222A) follows the part; a real value (10k) stays
     value_is_number = bool(value_part_number(ln)) or (bool(ln.mpn) and _norm_mpn(ln.value) == _norm_mpn(ln.mpn))
@@ -365,6 +365,8 @@ def switch(ln, alt: Alternative) -> None:
         ln.data["mpn"] = p.mpn
         if p.manufacturer:
             ln.data["manufacturer"] = p.manufacturer
+        if p.source == "LCSC":  # a different part: describe the new one
+            ln.description, ln.pulled_description = tidy_description(p), True
         ln.offers = {s: ("re-check" if s != "LCSC" else o) for s, o in ln.offers.items()}
     ln.offers["LCSC"] = p
 
@@ -372,7 +374,7 @@ def switch(ln, alt: Alternative) -> None:
 def switch_back(ln) -> bool:
     if ln.original is None:
         return False
-    ln.data, ln.offers, ln.value = ln.original
+    ln.data, ln.offers, ln.value, ln.description, ln.pulled_description = ln.original
     ln.original = None
     return True
 

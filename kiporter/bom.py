@@ -33,6 +33,7 @@ class BomLine:
     offers: dict = field(default_factory=dict)  # supplier -> PartResult | str
     alts: dict = field(default_factory=dict)  # "LCSC" -> alternatives.Alternative | None
     original: tuple | None = None  # (data, offers, value) from before switching to a suggested part
+    pulled_description: bool = False  # description came from LCSC, not from the schematic
 
     @property
     def mpn(self) -> str:

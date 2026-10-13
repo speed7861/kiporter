@@ -99,7 +99,7 @@ class PartResult:
         d = {
             "manufacturer": self.manufacturer,
             "mpn": self.mpn,
-            "description": self.description,
+            "description": tidy_description(self) if self.source == "LCSC" else self.description,
             "datasheet": self.datasheet,
             "package": self.package,
         }
@@ -109,6 +109,39 @@ class PartResult:
         if self.lcsc_id:
             d["lcsc"] = self.lcsc_id
         return {k: v.strip() for k, v in d.items() if v and v.strip()}
+
+
+# ---------------------------------------------------------------- descriptions
+# specs worth reading in a one-line description, in this order; the rest of LCSC's list is left out
+_DESC_FIRST = ["Capacitance", "Resistance", "Inductance", "Frequency", "Type", "Output Voltage", "Pins Structure",
+               "Number of Pins", "Pitch", "Mounting Type", "Tolerance", "Voltage Rating", "Temperature Coefficient",
+               "Power(Watts)", "Current Rating", "Contact Plating"]
+_DESC_SKIP = {"Operating Temperature", "Color", "Contact Material", "Plastic Material", "Flame Retardant Rating",
+              "Number of Rows", "Number of PINs Per Row", "Row Spacing", "Reference Series", "Supplementary Features"}
+
+
+def tidy_description(r: "PartResult") -> str:
+    """A readable one-line description of an LCSC part: its category, then its main specs.
+    (LCSC's own text is a run of bare numbers, often with Chinese words mixed in.)"""
+    attrs: dict[str, str] = {}
+    for item in str(r.extra.get("Attributes", "")).split("; "):
+        k, sep, v = item.partition(": ")
+        if sep and v.strip() and v.strip() not in ("-", "~"):
+            attrs[k.strip()] = v.strip()
+    category = re.sub(r"\s*-\s*SMD/SMT\s*$", "", r.category or "").strip()
+    if not attrs:
+        text = re.sub(r"[^\x00-\x7f±℃µΩ°]+", " ", r.description or "")  # drop Chinese words
+        text = re.sub(r"\bROHS\b", "", text, flags=re.I)
+        return " ".join(text.replace(" ,", ",").split()).strip(" ,")
+    values: list[str] = []
+    for k in _DESC_FIRST + [k for k in attrs if k not in _DESC_FIRST]:
+        v = attrs.get(k)
+        if v and k not in _DESC_SKIP and v not in values:
+            values.append(v)
+    pkg = (r.package or "").strip()
+    if pkg and not any(pkg.lower() in x.lower() for x in values):
+        values = values[:8] + [pkg]
+    return ", ".join(([category] if category else []) + values[:9])
 
 
 # ---------------------------------------------------------------- helpers

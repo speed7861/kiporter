@@ -51,8 +51,13 @@ def _set_field(sym: list, key: str, value: str, names: dict[str, str]) -> bool:
     The key "value" is the symbol's Value."""
     if key == "value":
         return fields.set_property(sym, "Value", value)
+    fill_only = key.endswith("?")  # "description?": write it only where the symbol has none
+    key = key.rstrip("?")
     known = [n.lower() for n in dict.fromkeys([names[key]] + fields.ALIASES[key])]
     props = [p for p in sexpr.children(sym, "property") if len(p) > 2]
+    if fill_only and any(sexpr.unquote(p[1]).lower() in known and sexpr.unquote(p[2]).strip() not in ("", "~")
+                         for p in props):
+        return False
     for p in props:
         if sexpr.unquote(p[1]).lower() in known:
             if sexpr.unquote(p[2]) == value:
