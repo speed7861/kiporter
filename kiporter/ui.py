@@ -20,6 +20,20 @@ def _keep(ph):
     return ph
 
 
+APP_ID = "speed7861.Kiporter"
+
+
+def set_app_id() -> None:
+    """Windows: give Kiporter its own taskbar identity so it shows its own icon, not Python's.
+    Must run before the first window is created."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+        except (AttributeError, OSError):
+            pass
+
+
 def logo_path() -> Path | None:
     for name in ("logo.png", "logo.gif"):
         p = ASSETS / name
@@ -57,7 +71,13 @@ def setup(root: tk.Tk, settings) -> None:
     style.configure("Busy.TLabel", foreground="#8a6d00")
     style.configure("Disconnected.TCheckbutton", foreground="#b3261e")
     style.configure("Treeview", rowheight=int(size * 2.2))
-    icon = load_logo(64)
+    ico = ASSETS / "logo.ico"
+    if sys.platform == "win32" and ico.exists():
+        try:
+            root.iconbitmap(default=str(ico))  # crisp multi-size icon for title bar, taskbar and Alt+Tab
+        except tk.TclError:
+            pass
+    icon = load_logo(256)
     if icon is not None:
         try:
             root.iconphoto(True, icon)

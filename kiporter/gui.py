@@ -26,7 +26,7 @@ COLUMNS = {
     "mpn": ("MPN", 130, lambda r: r.mpn.lower()),
     "mfr": ("Manufacturer", 115, lambda r: r.manufacturer.lower()),
     "package": ("Package", 80, lambda r: r.package.lower()),
-    "cad": ("CAD", 82, lambda r: cad.score(r)),
+    "cad": ("CAD (EasyEDA)", 100, lambda r: cad.score(r)),
     "stock": ("In stock", 78, lambda r: r.stock if r.stock is not None else -1),
     "lead": ("Lead time", 66, lambda r: r.lead_days if r.lead_days is not None else 10 ** 6),
     "price": ("Price", 60, lambda r: r.price if r.price is not None else 10 ** 9),
@@ -41,6 +41,7 @@ CAD_FILTERS = [("any", "All parts"), ("symfp", "Symbol + footprint"), ("symfp3d"
 
 class App(tk.Tk):
     def __init__(self) -> None:
+        ui.set_app_id()
         super().__init__()
         self.settings = Settings.load()
         ui.setup(self, self.settings)
@@ -227,7 +228,7 @@ class App(tk.Tk):
         for c, (h, w, _) in COLUMNS.items():
             self.tree.heading(c, text=h, command=lambda c=c: self._sort_clicked(c))
             anchor = "e" if c in ("stock", "lead", "price", "moq") else "center" if c == "cad" else "w"
-            self.tree.column(c, width=w, stretch=(c == "desc"), anchor=anchor)
+            self.tree.column(c, width=w, stretch=False, anchor=anchor)
         ysb = ttk.Scrollbar(res_frame, orient="vertical", command=self.tree.yview)
         xsb = ttk.Scrollbar(res_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
@@ -661,6 +662,7 @@ class App(tk.Tk):
             if self.settings.check_cad:
                 self.cad_pool.submit(self._check_cad, gen, iid, r)
         self._apply_sort()
+        self._autosize_columns()
         self.log(f"{name}: {len(res)} results")
         self._search_done_one(gen)
 
@@ -684,6 +686,7 @@ class App(tk.Tk):
             return
         if self.tree.exists(iid):
             self.tree.set(iid, "cad", cad.label(self.results[iid]))
+            self.tree.set(iid, "package", self.results[iid].package)
             if iid in self.tree.selection():  # update the "checking..." line in the details
                 self._show_details(self.results[iid])
         if not self._resort_pending:  # batch re-sorting/filtering while results stream in
@@ -693,7 +696,20 @@ class App(tk.Tk):
     def _deferred_resort(self) -> None:
         self._resort_pending = False
         self._apply_sort()
+        self._autosize_columns()
         self._update_count_status()
+
+    def _autosize_columns(self) -> None:
+        """Fit columns to their text so long descriptions can be read by scrolling sideways."""
+        from tkinter import font as tkfont
+        f = tkfont.nametofont("TkDefaultFont")
+        caps = {"mpn": 320, "mfr": 260, "package": 220, "spn": 260, "cad": 140, "desc": 3000}
+        idx = list(COLUMNS)
+        rows = [self.tree.item(i, "values") for i in self.tree.get_children()]
+        for col, cap in caps.items():
+            j = idx.index(col)
+            longest = max([f.measure(str(r[j])) for r in rows if len(r) > j] + [f.measure(COLUMNS[col][0]) + 18])
+            self.tree.column(col, width=min(longest + 18, cap), stretch=False)
 
     def _cad_filter_changed(self) -> None:
         self.settings.cad_filter = CAD_FILTERS[max(self.cad_filter_combo.current(), 0)][0]
@@ -754,15 +770,15 @@ class App(tk.Tk):
         msg = "Loading preview…" if self.settings.auto_preview else "Preview off (Settings → Search)"
         self.preview.set_symbol(None, None, msg)
         self.preview.set_footprint(None, msg)
-        self.preview.set_3d(None, "Open this tab to render the 3D model" if self.settings.preview_3d
-                            else "3D preview off (Settings → Search)")
+        self.preview.set_3d(None, "The 3D view appears here once the part's CAD data has loaded" if
+                            self.settings.preview_3d else "3D preview off (Settings → Search)")
         # debounce: only load if the user stays on this row
         self.after(250, lambda: self._load_preview(token, r))
 
-    def _load_preview(self, token: int, r: PartResult) -> None:
+    def _load_preview(self, token: int, r: PartResult, attempt: int = 0) -> None:
         if token != self._preview_token:
             return
-        if self.settings.show_images and r.image_url:
+        if self.settings.show_images and r.image_url and attempt == 0:
             self.run_bg(lambda: cad.image_bytes(r.image_url),
                         lambda data: token == self._preview_token and self.preview.set_photo(
                             data, "No photo available"))
@@ -799,9 +815,16 @@ class App(tk.Tk):
                 self._render_3d()
 
         def fail(e):
-            if token == self._preview_token:
-                self.preview.set_symbol(None, None, f"Preview failed: {e}")
-                self.preview.set_footprint(None, f"Preview failed: {e}")
+            if token != self._preview_token:
+                return
+            if attempt == 0 and "limits how fast" in str(e):  # EasyEDA busy: try once more by itself
+                self.preview.set_symbol(None, None, "EasyEDA is busy - retrying…")
+                self.preview.set_footprint(None, "EasyEDA is busy - retrying…")
+                self.after(3000, lambda: self._load_preview(token, r, attempt=1))
+                return
+            self.preview.set_symbol(None, None, f"Preview failed: {e}")
+            self.preview.set_footprint(None, f"Preview failed: {e}")
+            self.preview.set_3d(None, f"Preview failed: {e}")
         self.run_bg(work, done, fail)
 
     def _render_3d(self) -> None:
@@ -823,15 +846,19 @@ class App(tk.Tk):
                     lambda e: token == self._preview_token and self.preview.set_3d(None, f"3D preview: {e}"))
 
     @staticmethod
-    def _cad_text(r: PartResult) -> tuple[str, str | None]:
+    def _cad_text(r: PartResult) -> tuple[str, str | None, str]:
         if r.cad is None:
-            return "checking…", "muted"
+            return "checking…", "muted", ""
         s, f, m = r.cad
         marks = "   ".join(("✔ " if ok else "✖ ") + n for n, ok in
                            (("Symbol", s), ("Footprint", f), ("3D model", m)))
-        src = f"   (free EasyEDA model, LCSC {r.cad_lcsc})" if r.cad_lcsc and (s or f) else \
-            "   (none at LCSC - use 'Find CAD elsewhere')" if not (s or f) else ""
-        return marks + src, "good" if s and f else "bad"
+        if r.cad_lcsc and (s or f):
+            src = (f"EasyEDA (LCSC part {r.cad_lcsc})" if r.source == "LCSC" else
+                   f"EasyEDA, via LCSC part {r.cad_lcsc} with the same MPN. {r.source} does not supply CAD "
+                   "files - use 'Find CAD elsewhere' for its SamacSys / Ultra Librarian model.")
+        else:
+            src = "Not at EasyEDA - use 'Find CAD elsewhere' (SnapEDA / Ultra Librarian / SamacSys)."
+        return marks, "good" if s and f else "bad", src
 
     @staticmethod
     def _spec_rows(text: str) -> list[tuple]:
@@ -849,13 +876,13 @@ class App(tk.Tk):
         stock_style = "good" if r.stock else "bad"
         price = f"{r.price_str} each" + (f"  (min. order {r.moq})" if r.moq and r.moq > 1 else "") if r.price_str else ""
         host = r.url.split("/")[2] if r.url.count("/") >= 2 else r.url
-        cad_txt, cad_style = self._cad_text(r)
+        cad_txt, cad_style, cad_src = self._cad_text(r)
         buy = [("Supplier", r.source), ("Supplier part #", r.supplier_pn),
                ("In stock", (r.stock_str or "0") if r.stock is not None else "", stock_style),
                ("Lead time", r.lead_str), ("Unit price", price), ("Lifecycle", r.lifecycle),
                ("JLCPCB library", r.extra.get("JLCPCB library", ""))]
         part = [("Package", r.package), ("Category", r.category), ("CAD models", cad_txt, cad_style),
-                ("Datasheet", "Open datasheet" if r.datasheet else "", ("link", r.datasheet)),
+                ("CAD source", cad_src), ("Datasheet", "Open datasheet" if r.datasheet else "", ("link", r.datasheet)),
                 ("Product page", f"Open on {host}" if r.url else "", ("link", r.url))]
         specs = self._spec_rows(r.extra.get("Attributes", ""))
         notes = [(k, v) for k, v in r.extra.items() if k not in ("Attributes", "JLCPCB library", "Detailed") and v]

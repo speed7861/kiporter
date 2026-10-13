@@ -19,6 +19,7 @@ _lock = threading.Lock()
 _CACHE_FILE = app_data_dir() / "cad_cache.json"
 _avail: dict[str, list] = {}
 _equiv: dict[str, str] = {}
+_equiv_pkg: dict[str, str] = {}  # MPN -> package of the matched LCSC part
 _cad_json: dict[str, dict] = {}
 _staged: dict[str, StagedPart] = {}
 _loaded = False
@@ -35,6 +36,7 @@ def _load() -> None:
         data = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
         _avail.update(data.get("avail", {}))
         _equiv.update(data.get("equiv", {}))
+        _equiv_pkg.update(data.get("equiv_pkg", {}))
     except (OSError, ValueError):
         pass
 
@@ -42,7 +44,7 @@ def _load() -> None:
 def save_cache() -> None:
     with _lock:
         try:
-            _CACHE_FILE.write_text(json.dumps({"avail": _avail, "equiv": _equiv}), encoding="utf-8")
+            _CACHE_FILE.write_text(json.dumps({"avail": _avail, "equiv": _equiv, "equiv_pkg": _equiv_pkg}), encoding="utf-8")
         except OSError:
             pass
 
@@ -69,7 +71,7 @@ def cad_data(lcsc_id: str) -> dict | None:
     import time
     from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
     data = None
-    for attempt in range(3):  # EasyEDA answers 403 when hit too fast: back off and retry
+    for attempt in range(4):  # EasyEDA answers 403 when hit too fast: back off and retry
         _pace()
         data = EasyedaApi().get_cad_data_of_component(lcsc_id=lcsc_id) or None
         if data:
@@ -111,6 +113,8 @@ def lcsc_for(r: PartResult) -> str:
     eq = find_lcsc_equivalent(r.mpn)
     with _lock:
         _equiv[key] = eq.supplier_pn if eq else ""
+        if eq and eq.package:
+            _equiv_pkg[key] = eq.package
     return _equiv[key]
 
 
@@ -119,6 +123,8 @@ def check(r: PartResult) -> tuple[bool, bool, bool]:
     lcsc = lcsc_for(r)
     r.cad_lcsc = lcsc
     r.cad = availability(lcsc) if lcsc else NONE
+    if not r.package:  # e.g. Mouser gives no package: take it from the matched LCSC part
+        r.package = _equiv_pkg.get(r.mpn.strip().upper(), "")
     return r.cad
 
 
@@ -128,6 +134,10 @@ def score(r: PartResult) -> int:
         return -1
     s, f, m = r.cad
     return 3 if s and f and m else 2 if s and f else 1 if s or f else 0
+
+
+BUSY_MSG = ("EasyEDA did not send the CAD data for {} - it limits how fast parts can be fetched. "
+            "Wait a few seconds and select the part again.")
 
 
 def label(r: PartResult) -> str:
@@ -143,7 +153,10 @@ def staged(lcsc_id: str, data: dict | None = None) -> StagedPart:
     from .importers import stage_lcsc
     lcsc_id = lcsc_id.strip().upper()
     if lcsc_id not in _staged:
-        part = stage_lcsc(lcsc_id, {}, cad=cad_data(lcsc_id))
+        data_json = cad_data(lcsc_id)
+        if not data_json:
+            raise RuntimeError(BUSY_MSG.format(lcsc_id))
+        part = stage_lcsc(lcsc_id, {}, cad=data_json)
         with _lock:
             _staged[lcsc_id] = part
     base = _staged[lcsc_id]
