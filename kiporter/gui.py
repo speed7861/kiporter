@@ -1255,8 +1255,9 @@ class App(tk.Tk):
             self._import_failed(e)
 
         s = self.settings
-        self.run_bg(lambda: kicad_control.update_pcb_from_schematic(self.ki, p, s.update_pcb_method,
-                                                                    s.update_pcb_hotkey), done, fail)
+        options = {key: getattr(s, f"update_pcb_{key}", "") for key, _ in kicad_control.UPDATE_OPTIONS}
+        self.run_bg(lambda: kicad_control.update_pcb_from_schematic(
+            self.ki, p, s.update_pcb_method, s.update_pcb_hotkey, options, s.update_pcb_press), done, fail)
 
     # ================================================================ dialogs
     def open_settings(self, page: str | None = None) -> None:

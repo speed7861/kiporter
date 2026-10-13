@@ -115,6 +115,13 @@ class Settings:
     kicad_cli_path: str = ""  # explicit kicad-cli executable (optional)
     update_pcb_method: str = "auto"  # "auto" | "api" | "hotkey"
     update_pcb_hotkey: str = ""  # "" = read from KiCad's hotkey settings (default F8)
+    # tick boxes of KiCad's Update PCB dialog: "" = leave as KiCad has them, "on", "off"
+    update_pcb_relink: str = ""
+    update_pcb_replace: str = ""
+    update_pcb_delete_extra: str = ""
+    update_pcb_override_locks: str = ""
+    update_pcb_group: str = ""
+    update_pcb_press: bool = False  # press the dialog's Update PCB button as well
     auto_refresh_s: int = 15
     # ---- appearance
     ui_scale: float = 0.0  # 0 = system default

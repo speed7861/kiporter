@@ -160,9 +160,105 @@ def _find_dialog(title: str):
     return next((h for h, t in kicad_window_titles() if t == title), None)
 
 
+# the dialog's tick boxes: (settings key, label in KiCad)
+UPDATE_OPTIONS = [
+    ("relink", "Re-link footprints to schematic symbols based on their reference designators"),
+    ("replace", "Replace footprints with those specified by symbols"),
+    ("delete_extra", "Delete footprints with no symbols"),
+    ("override_locks", "Override locks"),
+    ("group", "Group footprints based on symbol group"),
+]
+UPDATE_BUTTON = "Update PCB"
+_BM_GETCHECK, _BM_CLICK = 0x00F0, 0x00F5
+
+
+def _dialog_buttons(dlg) -> dict[str, int]:
+    """Label -> handle of every button and tick box in a KiCad dialog (Windows only)."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    found: dict[str, int] = {}
+    proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def each(hwnd, _):
+        cls = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, cls, 64)
+        if cls.value.lower() == "button":
+            text = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd, text, 256)
+            label = text.value.replace("&", "").strip()
+            if label:
+                found.setdefault(label, hwnd)
+        return True
+    user32.EnumChildWindows(dlg, proc(each), 0)
+    return found
+
+
+def _send(hwnd, msg: int) -> int:
+    """SendMessage with a time limit, so a busy KiCad cannot hang Kiporter."""
+    import ctypes
+    from ctypes import wintypes
+    res = wintypes.DWORD(0)
+    ctypes.windll.user32.SendMessageTimeoutW(hwnd, msg, 0, 0, 0x0002, 3000, ctypes.byref(res))
+    return res.value
+
+
+def apply_update_options(options: dict[str, str] | None, press_update: bool = False, wait_s: float = 6.0) -> str:
+    """Tick / untick the dialog's options ('on' / 'off' / '' = leave) and optionally press Update PCB.
+    Returns a short note for the log ('' when there was nothing to do)."""
+    wanted = {k: v for k, v in (options or {}).items() if v in ("on", "off")}
+    if not wanted and not press_update:
+        return ""
+    if not IS_WIN:
+        return "setting the dialog's options automatically only works on Windows"
+    end = time.time() + wait_s
+    dlg = _find_dialog(UPDATE_DIALOG_TITLE)
+    while not dlg and time.time() < end:
+        time.sleep(0.2)
+        dlg = _find_dialog(UPDATE_DIALOG_TITLE)
+    if not dlg:
+        return "the dialog did not open in time, so its options were left alone"
+    time.sleep(0.4)  # let KiCad finish building the dialog
+    buttons = _dialog_buttons(dlg)
+    changed, missing = [], []
+    for key, label in UPDATE_OPTIONS:
+        if key not in wanted:
+            continue
+        hwnd = buttons.get(label)
+        if not hwnd:
+            missing.append(label)
+            continue
+        if bool(_send(hwnd, _BM_GETCHECK) & 1) != (wanted[key] == "on"):
+            _send(hwnd, _BM_CLICK)
+            changed.append(f"{'ticked' if wanted[key] == 'on' else 'unticked'} '{label}'")
+            time.sleep(0.3)  # KiCad re-checks the changes after every tick
+    notes = [", ".join(changed) if changed else "options already as configured"] if wanted else []
+    if missing:
+        notes.append("not in this KiCad version: " + ", ".join(f"'{m}'" for m in missing))
+    if press_update:
+        hwnd = buttons.get(UPDATE_BUTTON)
+        if hwnd:
+            time.sleep(0.5)
+            _send(hwnd, _BM_CLICK)
+            notes.append("pressed Update PCB")
+        else:
+            notes.append("could not find the Update PCB button")
+    return "; ".join(notes)
+
+
 def update_pcb_from_schematic(ki: KiCadInstall, project: ProjectInfo | None, method: str = "auto",
-                              hotkey: str = "") -> tuple[bool, str]:
-    """method: 'auto' (API, then keyboard), 'api' or 'hotkey'."""
+                              hotkey: str = "", options: dict[str, str] | None = None,
+                              press_update: bool = False) -> tuple[bool, str]:
+    """method: 'auto' (API, then keyboard), 'api' or 'hotkey'. options / press_update: see apply_update_options."""
+    ok, msg = _open_update_dialog(ki, project, method, hotkey)
+    if ok:
+        note = apply_update_options(options, press_update)
+        if note:
+            msg += f" - {note}"
+    return ok, msg
+
+
+def _open_update_dialog(ki: KiCadInstall, project: ProjectInfo | None, method: str, hotkey: str) -> tuple[bool, str]:
     dlg = _find_dialog(UPDATE_DIALOG_TITLE)
     if dlg:
         _focus_window(dlg)

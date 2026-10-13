@@ -453,6 +453,17 @@ class SettingsTab(ttk.Frame):
         self.row(p, "update_pcb_hotkey", "Shortcut (blank = read from KiCad, normally F8)", width=12)
         self.note(p, "The keyboard fallback needs xdotool on Linux (sudo apt install xdotool) and "
                      "Accessibility permission for Kiporter on macOS.")
+        self.section(p, "Options in KiCad's Update PCB dialog")
+        tri = [("", "Leave as KiCad has it"), ("on", "Tick"), ("off", "Untick")]
+        self.row(p, "update_pcb_relink", "Re-link footprints by reference designator", "choice", tri)
+        self.row(p, "update_pcb_replace", "Replace footprints with those specified by symbols", "choice", tri)
+        self.row(p, "update_pcb_delete_extra", "Delete footprints with no symbols", "choice", tri)
+        self.row(p, "update_pcb_override_locks", "Override locks", "choice", tri)
+        self.row(p, "update_pcb_group", "Group footprints based on symbol group", "choice", tri)
+        self.row(p, "update_pcb_press", "Also press 'Update PCB' in the dialog (otherwise it stays open for you "
+                 "to review and press yourself)", "bool")
+        self.note(p, "Kiporter sets these in the dialog each time you use the button. Windows only for now; on "
+                     "macOS and Linux the dialog opens with KiCad's own settings.")
         self.section(p, "Detected")
         self.kicad_info = tk.StringVar()
         r = self._next(p)
