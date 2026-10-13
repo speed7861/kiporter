@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .config import app_data_dir
 from .library import MODEL_EXTS, StagedPart
-from .providers import PartResult, find_lcsc_equivalent
+from .providers import PartResult, _norm_mpn, find_lcsc_equivalent
 
 EASYEDA_URL = "https://easyeda.com/api/products/{}/components?version=6.4.19.5"
 HEADERS = {
@@ -30,6 +30,9 @@ HEADERS = {
     "Referer": "https://easyeda.com/",
 }
 MIN_GAP_S = 1.0  # at most about one EasyEDA request per second
+# EasyEDA's catalogue search: one request says for a whole page of parts whether CAD data exists
+CATALOGUE_URL = "https://pro.easyeda.com/api/eda/product/search"
+CATALOGUE_GAP_S = 0.5
 BACKOFF_MIN = [2, 5, 15, 30]  # minutes to wait after successive blocks
 
 _lock = threading.Lock()
@@ -45,6 +48,8 @@ _blocked_until = [0.0]
 _block_level = [0]
 _pace_lock = threading.Lock()
 _last_call = [0.0]
+_cat_lock = threading.Lock()
+_cat_last = [0.0]
 
 NONE = (False, False, False)
 
@@ -137,6 +142,65 @@ def _fetch(lcsc_id: str) -> dict:
     return data["result"]
 
 
+# ---------------------------------------------------------------- catalogue (availability only)
+def catalogue(keyword: str, limit: int = 100) -> list[dict]:
+    """Parts matching a keyword, part number or LCSC number: [{lcsc, mpn, package, stock, avail}].
+    Nothing is downloaded - this only says whether a symbol / footprint / 3D model exists."""
+    from .providers import HTTP
+    if blocked_for():
+        raise EasyedaBlocked(blocked_message())
+    with _cat_lock:  # space the requests out; they may overlap, but never start in a burst
+        wait = _cat_last[0] + CATALOGUE_GAP_S - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _cat_last[0] = time.monotonic()
+    r = HTTP.post(CATALOGUE_URL, data={"keyword": keyword, "currPage": 1, "pageSize": limit, "needAggs": "false"},
+                  headers={**HEADERS, "Referer": "https://pro.easyeda.com/editor"}, timeout=30)
+    if r.status_code in (403, 429):
+        _trip()
+        raise EasyedaBlocked(blocked_message())
+    try:
+        products = (r.json().get("result") or {}).get("productList") or []
+    except ValueError as e:
+        raise RuntimeError(f"EasyEDA sent an unexpected answer ({r.status_code})") from e
+    out = []
+    for p in products:
+        attrs = (p.get("device_info") or {}).get("attributes") or {}
+        avail = (bool(attrs.get("Symbol")), bool(attrs.get("Footprint")), bool(attrs.get("3D Model"))) \
+            if p.get("hasDevice") else NONE
+        out.append({"lcsc": str(p.get("number") or "").upper(), "mpn": str(p.get("mpn") or ""),
+                    "package": str(p.get("package") or ""), "stock": p.get("stock") or 0, "avail": avail})
+    return out
+
+
+def _remember(parts: list[dict]) -> None:
+    """Keep what a catalogue answer says: availability per LCSC number, and the best LCSC part per MPN."""
+    _load()
+    best: dict[str, dict] = {}
+    with _lock:
+        for p in parts:
+            if not p["lcsc"]:
+                continue
+            _avail[p["lcsc"]] = list(p["avail"])
+            key = p["mpn"].strip().upper()
+            if key and (p["avail"][0] or p["avail"][1]):
+                cur = best.get(key)
+                if cur is None or p["stock"] > cur["stock"]:
+                    best[key] = p
+        for key, p in best.items():
+            if not _equiv.get(key):
+                _equiv[key] = p["lcsc"]
+                if p["package"]:
+                    _equiv_pkg[key] = p["package"]
+
+
+def learn(keyword: str) -> int:
+    """One catalogue request for a search: afterwards most results' CAD availability is known."""
+    parts = catalogue(keyword, 100)
+    _remember(parts)
+    return len(parts)
+
+
 def cad_data(lcsc_id: str) -> dict:
     """Raw EasyEDA CAD JSON for an LCSC part - from memory, disk cache, or one request."""
     lcsc_id = lcsc_id.strip().upper()
@@ -181,6 +245,15 @@ def availability(lcsc_id: str) -> tuple[bool, bool, bool]:
     cached = cached_availability(lcsc_id)
     if cached is not None:
         return cached  # type: ignore[return-value]
+    try:  # the catalogue answers without downloading the model
+        _remember([p for p in catalogue(lcsc_id, 5) if p["lcsc"] == lcsc_id])
+    except EasyedaBlocked:
+        raise
+    except Exception:  # noqa: BLE001 - fall back to the model itself
+        pass
+    cached = cached_availability(lcsc_id)
+    if cached is not None:
+        return cached  # type: ignore[return-value]
     try:
         res = _avail_from(cad_data(lcsc_id))
     except EasyedaNoData:
@@ -199,6 +272,24 @@ def lcsc_for(r: PartResult) -> str:
     key = r.mpn.strip().upper()
     if key in _equiv:
         return _equiv[key]
+    try:  # the catalogue gives the matching LCSC part and its CAD availability in one request
+        target = _norm_mpn(r.mpn)
+        parts = catalogue(r.mpn, 10) if target else []
+        exact = [p for p in parts if _norm_mpn(p["mpn"]) == target]
+        # tolerate packaging suffixes such as -TR / /R7 / #PBF
+        loose = [p for p in parts if not exact and len(_norm_mpn(p["mpn"])) >= max(4, len(target) - 4)
+                 and (_norm_mpn(p["mpn"]).startswith(target) or target.startswith(_norm_mpn(p["mpn"])))]
+        pool = sorted(exact or loose[:1], key=lambda p: (not (p["avail"][0] or p["avail"][1]), -p["stock"]))
+        _remember(pool)
+        with _lock:
+            _equiv[key] = pool[0]["lcsc"] if pool else ""
+            if pool and pool[0]["package"]:
+                _equiv_pkg[key] = pool[0]["package"]
+        return _equiv[key]
+    except EasyedaBlocked:
+        raise
+    except Exception:  # noqa: BLE001 - catalogue unreachable: use the JLCPCB search instead
+        pass
     eq = find_lcsc_equivalent(r.mpn)
     with _lock:
         _equiv[key] = eq.supplier_pn if eq else ""

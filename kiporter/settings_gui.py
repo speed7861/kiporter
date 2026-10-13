@@ -339,8 +339,8 @@ class SettingsTab(ttk.Frame):
         self.row(p, "search_limit", "Results per supplier (max 50)", "int", width=8)
         self.row(p, "in_stock_only", "Show in-stock parts only", "bool")
         self.section(p, "CAD models")
-        self.row(p, "check_cad_all", "Check CAD for every result automatically (one EasyEDA request per part - EasyEDA may block you "
-                 "for a few minutes if overused; otherwise parts are checked when selected or filtered)", "bool")
+        self.row(p, "auto_check_cad", "After a search, check which results have a symbol, footprint and 3D model "
+                 "(nothing is downloaded until you select or import a part)", "bool")
         self.row(p, "cad_filter", "Show", "choice",
                  [("any", "All parts"), ("symfp", "Parts with symbol + footprint"),
                   ("symfp3d", "Parts with symbol + footprint + 3D model")])

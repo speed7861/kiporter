@@ -98,7 +98,7 @@ class Settings:
     use_nexar: bool = False
     in_stock_only: bool = False
     search_limit: int = 50
-    check_cad_all: bool = False  # look up CAD availability for every result (many EasyEDA requests)
+    auto_check_cad: bool = True  # after a search, find out which results have CAD models (nothing is downloaded)
     cad_filter: str = "any"  # "any" | "symfp" | "symfp3d"
     auto_preview: bool = True
     show_images: bool = True

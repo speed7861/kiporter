@@ -51,6 +51,9 @@ class App(tk.Tk):
         self.ki = kicad_env.detect_kicad(self.settings.kicad_version, self.settings.kicad_cli_path)
         self.providers = providers.make_providers(self.settings)
         self.cad_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)  # EasyEDA: one request at a time
+        # parts from other suppliers may need SamacSys, whose answers take 10-15 s each: ask several at once
+        self.cad_pool_other = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+        self._learn_job: concurrent.futures.Future | None = None
 
         self.projects: list[kicad_env.ProjectInfo] = []
         self.results: dict[str, PartResult] = {}
@@ -170,6 +173,7 @@ class App(tk.Tk):
     def _on_close(self) -> None:
         cad.save_cache()
         self.cad_pool.shutdown(wait=False, cancel_futures=True)
+        self.cad_pool_other.shutdown(wait=False, cancel_futures=True)
         self.destroy()
 
     # ================================================================ layout
@@ -690,6 +694,10 @@ class App(tk.Tk):
         self._pending_jobs = len(names)
         self.set_status(f"Searching {', '.join(names)} for '{kw}'…")
         limit = max(1, min(int(self.settings.search_limit or 50), 50))
+        if self.settings.auto_check_cad or self.settings.cad_filter != "any":
+            # one catalogue request tells which of the coming results have CAD models; it runs first in
+            # the CAD queue, so the per-part checks that follow mostly find their answer already there
+            self._learn_job = self.cad_pool.submit(self._learn_cad, gen, kw)
         for name in names:
             prov = self.providers[name]
             key = (name, kw.lower(), limit)
@@ -733,7 +741,7 @@ class App(tk.Tk):
             if r.source == "LCSC" or self.settings.cad_source in ("auto", "EasyEDA"):
                 cad.fill_known(r)  # from the cache - no network
             self.tree.insert("", "end", iid=iid, tags=tags, values=self._row_values(r))
-        if self.settings.check_cad_all or self.settings.cad_filter != "any":
+        if self.settings.auto_check_cad or self.settings.cad_filter != "any":
             self._queue_cad_checks()
         self._apply_sort()
         self._autosize_columns()
@@ -745,18 +753,33 @@ class App(tk.Tk):
         return (r.source, r.mpn, r.manufacturer, r.package, cad.label(r), r.stock_str, r.lead_str, r.price_str,
                 r.moq if r.moq is not None else "", r.supplier_pn, r.description)
 
+    def _learn_cad(self, gen: int, kw: str) -> None:
+        if gen != self._search_gen or cad.blocked_for():
+            return
+        try:
+            cad.learn(kw)
+        except Exception as e:  # noqa: BLE001
+            self.tlog(f"CAD catalogue: {e}")
+
     def _queue_cad_checks(self) -> None:
-        """Look up CAD availability (one EasyEDA request per part, one at a time) for unknown rows."""
+        """Find out which rows have CAD models (one at a time; LCSC rows first, they are quickest)."""
         gen = self._search_gen
-        for iid, r in self.results.items():
+        for iid, r in sorted(self.results.items(), key=lambda kv: kv[1].source != "LCSC"):
             if r.cad is None and iid not in self._cad_queued:
                 self._cad_queued.add(iid)
-                self.cad_pool.submit(self._check_cad, gen, iid, r)
+                pool = self.cad_pool if r.source == "LCSC" else self.cad_pool_other
+                pool.submit(self._check_cad, gen, iid, r)
         self._update_count_status()
 
     def _check_cad(self, gen: int, iid: str, r: PartResult) -> None:
         if gen != self._search_gen:
             return
+        job = self._learn_job
+        if job is not None and r.source != "LCSC":  # the catalogue answer may already cover this part
+            try:
+                job.result(timeout=30)
+            except Exception:  # noqa: BLE001
+                pass
         if not cad.blocked_for():
             try:
                 cad_sources.check_availability(r, self.settings)
@@ -808,7 +831,7 @@ class App(tk.Tk):
             if self.settings.cad_source in ("auto", "EasyEDA"):
                 cad.fill_known(r)
             self._refresh_row(r)
-        if self.settings.cad_filter != "any" or self.settings.check_cad_all:
+        if self.settings.cad_filter != "any" or self.settings.auto_check_cad:
             self._cad_queued.clear()
             self._queue_cad_checks()
         self._apply_sort()
