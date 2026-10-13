@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -12,91 +13,166 @@ from pathlib import Path
 from . import sexpr
 
 IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+IS_LINUX = not IS_WIN and not IS_MAC
 NO_WINDOW = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW
+FLATPAK_ID = "org.kicad.KiCad"
 
 
 def _ver_key(v: str) -> tuple:
     return tuple(int(p) if p.isdigit() else 0 for p in re.split(r"[.\-]", v))
 
 
+def _config_version(full: str) -> str:
+    """'9.0.2' -> '9.0' (the name of KiCad's per-version config folder)."""
+    parts = re.findall(r"\d+", full)
+    return f"{parts[0]}.{parts[1] if len(parts) > 1 else 0}" if parts else ""
+
+
 # ---------------------------------------------------------------- installation
-def kicad_install_dirs() -> dict[str, Path]:
-    """Map of version -> KiCad install root (folder containing bin/)."""
-    found: dict[str, Path] = {}
-    roots: list[Path] = []
+@dataclass
+class KiCadInstall:
+    version: str  # config version, e.g. "10.0"
+    config_dir: Path
+    cli: list[str] | None = None  # command (prefix) that runs kicad-cli
+    kicad: list[str] | None = None  # command (prefix) that starts KiCad
+    share_dir: Path | None = None  # folder holding symbols/, footprints/, 3dmodels/, template/
+    full_version: str = ""
+    label: str = ""
+
+    @property
+    def major(self) -> int:
+        return int(self.version.split(".")[0])
+
+    @property
+    def kicad_cli(self) -> str | None:
+        """Printable kicad-cli command (None if not available)."""
+        return " ".join(self.cli) if self.cli else None
+
+    def cli_cmd(self, *args) -> list[str]:
+        if not self.cli:
+            raise RuntimeError("kicad-cli was not found - install KiCad 8 or newer, or set its path in Settings")
+        return [*self.cli, *map(str, args)]
+
+
+def _cli_version(cmd: list[str]) -> str:
+    try:
+        r = subprocess.run([*cmd, "version"], capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW)
+        m = re.search(r"\d+\.\d+(\.\d+)?", r.stdout)
+        return m.group(0) if m else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _flatpak_dirs() -> list[Path]:
+    return [Path.home() / ".local/share/flatpak/app" / FLATPAK_ID, Path("/var/lib/flatpak/app") / FLATPAK_ID]
+
+
+def find_installs(cli_override: str = "") -> list[KiCadInstall]:
+    """Every KiCad installation found on this computer (newest first)."""
+    found: list[KiCadInstall] = []
+    cfg_root = kicad_config_root()
+
+    def add(full: str, cli: list[str] | None, kicad: list[str] | None, share: Path | None, label: str,
+            cfg: Path | None = None) -> None:
+        ver = _config_version(full)
+        if not ver or any(i.version == ver and i.label == label for i in found):
+            return
+        found.append(KiCadInstall(ver, (cfg or cfg_root) / ver, cli, kicad, share, full, label))
+
+    if cli_override and Path(cli_override).exists():
+        full = _cli_version([cli_override])
+        root = Path(cli_override).resolve().parent
+        share = next((d for d in (root.parent / "share" / "kicad", root.parent / "SharedSupport",
+                                  Path("/usr/share/kicad")) if (d / "symbols").exists()), None)
+        add(full, [cli_override], None, share, f"KiCad {full} ({cli_override})")
+
     if IS_WIN:
-        for env in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
-            if os.environ.get(env):
-                roots.append(Path(os.environ[env]) / "KiCad")
+        roots = [Path(os.environ[e]) / "KiCad" for e in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)")
+                 if os.environ.get(e)]
         if os.environ.get("LOCALAPPDATA"):
             roots.append(Path(os.environ["LOCALAPPDATA"]) / "Programs" / "KiCad")
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for sub in sorted(root.iterdir(), key=lambda d: _ver_key(d.name), reverse=True):
+                cli = sub / "bin" / "kicad-cli.exe"
+                if cli.exists() and re.match(r"^\d+(\.\d+)*$", sub.name):
+                    add(sub.name, [str(cli)], [str(sub / "bin" / "kicad.exe")], sub / "share" / "kicad",
+                        f"KiCad {sub.name} ({sub})")
+    elif IS_MAC:
+        import plistlib
+        apps = [Path("/Applications/KiCad/KiCad.app"), Path("/Applications/KiCad.app"),
+                Path.home() / "Applications/KiCad/KiCad.app", Path.home() / "Applications/KiCad.app"]
+        apps += sorted(Path("/Applications").glob("KiCad*/KiCad.app"))
+        for app in dict.fromkeys(apps):
+            cli = app / "Contents" / "MacOS" / "kicad-cli"
+            if not cli.exists():
+                continue
+            try:
+                full = plistlib.loads((app / "Contents" / "Info.plist").read_bytes()).get(
+                    "CFBundleShortVersionString", "")
+            except (OSError, ValueError):
+                full = ""
+            full = full or _cli_version([str(cli)])
+            add(full, [str(cli)], ["open", "-a", str(app)], app / "Contents" / "SharedSupport",
+                f"KiCad {full} ({app})")
     else:
-        roots += [Path("/usr"), Path("/Applications/KiCad")]
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for sub in root.iterdir():
-            exe = sub / "bin" / ("kicad-cli.exe" if IS_WIN else "kicad-cli")
-            if exe.exists() and re.match(r"^\d+(\.\d+)*$", sub.name):
-                found.setdefault(sub.name, sub)
-    return dict(sorted(found.items(), key=lambda kv: _ver_key(kv[0])))
+        for cli in dict.fromkeys(filter(None, [shutil.which("kicad-cli"), "/usr/bin/kicad-cli",
+                                                "/usr/local/bin/kicad-cli"])):
+            if Path(cli).exists():
+                full = _cli_version([cli])
+                share = next((d for d in (Path(cli).resolve().parent.parent / "share" / "kicad",
+                                          Path("/usr/share/kicad"), Path("/usr/local/share/kicad"))
+                              if (d / "symbols").exists() or (d / "template").exists()), None)
+                kicad = shutil.which("kicad") or str(Path(cli).parent / "kicad")
+                add(full, [cli], [kicad], share, f"KiCad {full} ({cli})")
+        for d in _flatpak_dirs():
+            if d.exists() and shutil.which("flatpak"):
+                cmd = ["flatpak", "run", "--command=kicad-cli", FLATPAK_ID]
+                full = _cli_version(cmd)
+                share = d / "current" / "active" / "files" / "share" / "kicad"
+                add(full, cmd, ["flatpak", "run", FLATPAK_ID], share if share.exists() else None,
+                    f"KiCad {full} (Flatpak)", Path.home() / ".var/app" / FLATPAK_ID / "config" / "kicad")
+                break
+    found.sort(key=lambda i: _ver_key(i.full_version or i.version), reverse=True)
+    return found
 
 
 def kicad_config_root() -> Path:
     if IS_WIN:
         return Path(os.environ.get("APPDATA", Path.home())) / "kicad"
-    if sys.platform == "darwin":
+    if IS_MAC:
         return Path.home() / "Library" / "Preferences" / "kicad"
-    return Path.home() / ".config" / "kicad"
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    native = xdg / "kicad"
+    flat = Path.home() / ".var/app" / FLATPAK_ID / "config" / "kicad"
+    return native if native.exists() or not flat.exists() else flat
 
 
-def config_versions() -> list[str]:
-    root = kicad_config_root()
+def config_versions(root: Path | None = None) -> list[str]:
+    root = root or kicad_config_root()
     if not root.is_dir():
         return []
     vs = [d.name for d in root.iterdir() if d.is_dir() and re.match(r"^\d+\.\d+$", d.name)]
     return sorted(vs, key=_ver_key)
 
 
-@dataclass
-class KiCadInstall:
-    version: str  # config version, e.g. "10.0"
-    root: Path | None  # install dir
-    config_dir: Path
-
-    @property
-    def bin_dir(self) -> Path | None:
-        return self.root / "bin" if self.root else None
-
-    def exe(self, name: str) -> Path | None:
-        if not self.bin_dir:
-            return None
-        p = self.bin_dir / (name + (".exe" if IS_WIN and not name.endswith(".exe") else ""))
-        return p if p.exists() else None
-
-    @property
-    def kicad_cli(self) -> Path | None:
-        return self.exe("kicad-cli")
-
-    @property
-    def major(self) -> int:
-        return int(self.version.split(".")[0])
-
-
-def detect_kicad(preferred: str = "") -> KiCadInstall:
-    installs = kicad_install_dirs()
+def detect_kicad(preferred: str = "", cli_override: str = "") -> KiCadInstall:
+    """Pick the KiCad to work with: the preferred version, else the newest install with a config folder."""
+    installs = find_installs(cli_override)
+    if preferred:
+        for i in installs:
+            if i.version == preferred:
+                return i
+    for i in installs:
+        if i.config_dir.exists():
+            return i
+    if installs:
+        return installs[0]
     cfgs = config_versions()
-    installed_majors = {v.split(".")[0] for v in installs}
-    # newest config folder that belongs to an installed KiCad, else newest install
-    version = preferred or next(
-        (v for v in reversed(cfgs) if v.split(".")[0] in installed_majors), None
-    ) or (".".join(list(installs)[-1].split(".")[:2]) if installs else (cfgs[-1] if cfgs else "10.0"))
-    major = version.split(".")[0]
-    root = installs.get(version) or next(
-        (p for v, p in reversed(list(installs.items())) if v.split(".")[0] == major), None
-    )
-    cfg = kicad_config_root() / version
-    return KiCadInstall(version=version, root=root, config_dir=cfg)
+    ver = preferred or (cfgs[-1] if cfgs else "10.0")
+    return KiCadInstall(ver, kicad_config_root() / ver, label=f"KiCad {ver} (program not found)")
 
 
 # ---------------------------------------------------------------- JSON settings
@@ -188,8 +264,8 @@ def kicad_env_vars(ki: "KiCadInstall", project_dir: Path | None = None) -> dict[
     """Path variables as KiCad sees them (built-in defaults < Configure Paths < OS env)."""
     v: dict[str, str] = {}
     major = ki.major
-    if ki.root:
-        share = ki.root / "share" / "kicad"
+    if ki.share_dir:
+        share = ki.share_dir
         v[f"KICAD{major}_SYMBOL_DIR"] = str(share / "symbols")
         v[f"KICAD{major}_FOOTPRINT_DIR"] = str(share / "footprints")
         v[f"KICAD{major}_3DMODEL_DIR"] = str(share / "3dmodels")
@@ -266,10 +342,10 @@ def all_lib_entries(ki: "KiCadInstall", project_dir: Path | None, kind: str) -> 
 
 
 def is_stock_kicad_path(p: Path | None, ki: "KiCadInstall") -> bool:
-    if p is None or not ki.root:
+    if p is None or not ki.share_dir:
         return False
     try:
-        return str(p.resolve()).lower().startswith(str((ki.root / "share").resolve()).lower())
+        return str(p.resolve()).lower().startswith(str(ki.share_dir.resolve()).lower())
     except OSError:
         return False
 
@@ -303,10 +379,41 @@ def running_kicad_processes() -> set[str]:
     return procs & names
 
 
-def kicad_window_titles() -> list[tuple[int, str]]:
-    """(hwnd, title) for visible top-level windows owned by KiCad processes (Windows only)."""
+_KICAD_TITLE_RE = re.compile(r"KiCad|PCB Editor|Schematic Editor|Update PCB from Schematic")
+
+
+def _titles_unix() -> list[tuple[str, str]]:
+    """(handle, title) via AppleScript (macOS) or wmctrl/xdotool (Linux, X11/XWayland)."""
+    def run(cmd):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    out: list[tuple[str, str]] = []
+    if IS_MAC:
+        txt = run(["osascript", "-e", 'tell application "System Events" to get name of every window of '
+                                      '(every process whose name is "kicad")'])
+        for t in re.split(r",\s*", txt.strip()):
+            if t and t != "missing value":
+                out.append((t, t))
+        return out
+    if shutil.which("wmctrl"):
+        for line in run(["wmctrl", "-l"]).splitlines():
+            parts = line.split(None, 3)
+            if len(parts) == 4 and _KICAD_TITLE_RE.search(parts[3]):
+                out.append((parts[0], parts[3]))
+    elif shutil.which("xdotool"):
+        for wid in run(["xdotool", "search", "--name", "KiCad|PCB Editor|Schematic Editor"]).split():
+            title = run(["xdotool", "getwindowname", wid]).strip()
+            if title:
+                out.append((wid, title))
+    return out
+
+
+def kicad_window_titles() -> list[tuple]:
+    """(handle, title) for KiCad's top-level windows. Empty if the platform offers no way to list them."""
     if not IS_WIN:
-        return []
+        return _titles_unix()
     import ctypes
     from ctypes import wintypes
 

@@ -9,12 +9,12 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING, Callable
 
-from . import kicad_control, library, libtools, providers
+from . import bom, kicad_control, library, libtools, providers, render, sexpr
 
 if TYPE_CHECKING:
     from .gui import App
 
-APP_TITLE = "KiCad Part Importer"
+APP_TITLE = "Kiporter"
 BROWSE = "\U0001f4c2  Browse for a .kicad_sym file…"
 
 
@@ -154,6 +154,9 @@ TOOLS = [
     ("KiCad setup check",
      "Finds path variables that hide KiCad's stock libraries/3D models, library-table entries pointing at "
      "missing files, and a disabled IPC API - and fixes them.", "setup"),
+    ("Browse & preview a library",
+     "Look through any of your libraries: every symbol and footprint drawn, 3D models rendered, fields listed.",
+     "browse"),
     ("Back up a library",
      "Zips a library's symbols, footprints and 3D models into one file.", "backup"),
 ]
@@ -180,7 +183,7 @@ class ToolsTab(ttk.Frame):
 
     def open(self, key: str) -> None:
         cls = {"cleanup": CleanupDialog, "merge": MergeDialog, "localize": LocalizeDialog,
-               "setup": SetupCheckDialog, "backup": None}[key]
+               "setup": SetupCheckDialog, "browse": LibraryBrowserDialog, "backup": None}[key]
         if key == "backup":
             self._backup()
             return
@@ -332,7 +335,7 @@ class MergeDialog(_ToolDialog):
         super().__init__(app, "Merge libraries", "980x640")
         b = self.body
         ttk.Label(b, text="1. Libraries to merge (Ctrl/Shift-click to select several):",
-                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+                  style="Bold.TLabel").pack(anchor="w")
         lf = ttk.Frame(b)
         lf.pack(fill="both", expand=True, pady=4)
         self.listbox = tk.Listbox(lf, selectmode="extended", height=10, exportselection=False)
@@ -344,7 +347,7 @@ class MergeDialog(_ToolDialog):
         self.sources: list[library.LibraryTarget] = []
         self._fill_sources()
 
-        ttk.Label(b, text="2. Merge into:", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(8, 0))
+        ttk.Label(b, text="2. Merge into:", style="Bold.TLabel").pack(anchor="w", pady=(8, 0))
         dest = ttk.Frame(b)
         dest.pack(fill="x", pady=4)
         self.dest_mode = tk.StringVar(value="new")
@@ -362,7 +365,7 @@ class MergeDialog(_ToolDialog):
         self.chooser.grid(row=1, column=1, columnspan=4, sticky="ew", padx=4, pady=(4, 0))
         dest.columnconfigure(3, weight=1)
 
-        ttk.Label(b, text="3. Options:", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(8, 0))
+        ttk.Label(b, text="3. Options:", style="Bold.TLabel").pack(anchor="w", pady=(8, 0))
         opt = ttk.Frame(b)
         opt.pack(fill="x")
         ttk.Label(opt, text="When names clash:").grid(row=0, column=0, sticky="w")
@@ -462,7 +465,7 @@ class LocalizeDialog(_ToolDialog):
         p = app.current_project()
         b = self.body
         ttk.Label(b, text=f"Project:  {p.pro_file if p else '(none selected)'}",
-                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+                  style="Bold.TLabel").pack(anchor="w")
         ttk.Label(b, wraplength=720, justify="left", text=(
             "Copies every symbol, footprint and 3D model used by this project into the project library below, "
             "then re-points the schematic and PCB at it. The project then opens correctly on any PC. "
@@ -508,28 +511,155 @@ class LocalizeDialog(_ToolDialog):
                  "Localizing project")
 
 
+
+
+# ==================================================================== library browser
+class LibraryBrowserDialog(_ToolDialog):
+    """Browse any library: symbols and footprints drawn, 3D models rendered."""
+
+    def __init__(self, app: "App"):
+        super().__init__(app, "Browse & preview a library", "1180x700")
+        from .preview_gui import PreviewPane
+        from .kicad_env import kicad_env_vars, resolve
+        top = ttk.Frame(self.body)
+        top.pack(fill="x")
+        ttk.Label(top, text="Library:").pack(side="left")
+        self.chooser = LibraryChooser(top, app, width=90, on_change=self.load)
+        self.chooser.pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Label(top, text="Filter:").pack(side="left")
+        self.filter = tk.StringVar()
+        self.filter.trace_add("write", lambda *a: self._fill())
+        ttk.Entry(top, textvariable=self.filter, width=20).pack(side="left", padx=4)
+        pw = ttk.PanedWindow(self.body, orient="horizontal")
+        pw.pack(fill="both", expand=True, pady=8)
+        left = ttk.Notebook(pw)
+        self.sym_list = tk.Listbox(left, exportselection=False)
+        self.fp_list = tk.Listbox(left, exportselection=False)
+        left.add(self.sym_list, text=" Symbols ")
+        left.add(self.fp_list, text=" Footprints ")
+        pw.add(left, weight=1)
+        self.preview = PreviewPane(pw, on_3d_requested=self._render_3d)
+        pw.add(self.preview, weight=3)
+        self.sym_list.bind("<<ListboxSelect>>", lambda e: self._sym_selected())
+        self.fp_list.bind("<<ListboxSelect>>", lambda e: self._fp_selected())
+        self.lib: list | None = None
+        self.symbols: list[str] = []
+        self.footprints: list[Path] = []
+        self.current_fp: Path | None = None
+        p = app.current_project()
+        env = kicad_env_vars(app.ki, p.dir if p else None)
+        self.resolver = lambda uri: resolve(uri, env)
+        self.fpx = libtools.FootprintIndex(app.ki, p.dir if p else None)
+        self.load()
+
+    def load(self) -> None:
+        t = self.chooser.get()
+        self.lib, self.symbols, self.footprints = None, [], []
+        if t and t.sym_file.exists():
+            try:
+                self.lib = sexpr.parse(t.sym_file.read_text(encoding="utf-8", errors="replace"))
+                self.symbols = sorted(render.symbol_names(self.lib), key=str.lower)
+            except ValueError as e:
+                self.app.log(f"Cannot read {t.sym_file}: {e}")
+        if t and t.fp_dir.is_dir():
+            self.footprints = sorted(t.fp_dir.glob("*.kicad_mod"), key=lambda p: p.stem.lower())
+        self._fill()
+        self.preview.clear(f"{len(self.symbols)} symbols, {len(self.footprints)} footprints" if t else "")
+
+    def _fill(self) -> None:
+        f = self.filter.get().lower()
+        self.sym_list.delete(0, "end")
+        self._sym_shown = [s for s in self.symbols if f in s.lower()]
+        for s in self._sym_shown:
+            self.sym_list.insert("end", s)
+        self.fp_list.delete(0, "end")
+        self._fp_shown = [p for p in self.footprints if f in p.stem.lower()]
+        for p in self._fp_shown:
+            self.fp_list.insert("end", p.stem)
+
+    def _sym_selected(self) -> None:
+        sel = self.sym_list.curselection()
+        if not sel or self.lib is None:
+            return
+        name = self._sym_shown[sel[0]]
+        sym = next((s for s in sexpr.children(self.lib, "symbol") if sexpr.unquote(s[1]) == name), None)
+        props = [(sexpr.unquote(p[1]), sexpr.unquote(p[2])) for p in sexpr.children(sym, "property")] if sym else []
+        self.preview.set_details([name, ""] + [f"{k}: {v}" for k, v in props if v and not k.startswith("ki_")])
+        self.preview.set_symbol(self.lib, name, "")
+        fp_id = dict(props).get("Footprint", "")
+        f = self.fpx.file(fp_id) if ":" in fp_id else None
+        self._show_fp(f, f"Footprint '{fp_id}' not found" if fp_id else "No footprint assigned")
+        if self.preview.current_tab() in ("Details", "Photo"):
+            self.preview.select(self.preview.frames["Symbol"])
+
+    def _fp_selected(self) -> None:
+        sel = self.fp_list.curselection()
+        if sel:
+            f = self._fp_shown[sel[0]]
+            self._show_fp(f, "")
+            self.preview.set_details([f.stem, "", str(f)])
+            if self.preview.current_tab() in ("Details", "Photo", "Symbol"):
+                self.preview.select(self.preview.frames["Footprint"])
+
+    def _show_fp(self, f: Path | None, msg: str) -> None:
+        self.current_fp = f
+        self.preview.set_3d(None, "Open this tab to render the 3D model")
+        if not f:
+            self.preview.set_footprint(None, msg)
+            return
+        try:
+            self.preview.set_footprint(sexpr.parse(f.read_text(encoding="utf-8", errors="replace")), "")
+        except ValueError as e:
+            self.preview.set_footprint(None, f"Cannot read footprint: {e}")
+        if self.preview.current_tab() == "3D":
+            self._render_3d()
+
+    def _render_3d(self) -> None:
+        f = self.current_fp
+        if not f:
+            return
+        import hashlib
+        from .cad import preview_dir
+        out = preview_dir() / f"lib_{hashlib.md5(str(f).encode()).hexdigest()}_{int(f.stat().st_mtime)}.png"
+        if out.exists():
+            self.preview.set_3d(out)
+            return
+        self.preview.set_3d(None, "Rendering 3D view with kicad-cli…")
+        self.app.run_bg(lambda: render.render_3d(self.app.ki, f, out, resolver=self.resolver),
+                        lambda png: f == self.current_fp and self.preview.set_3d(png),
+                        lambda e: f == self.current_fp and self.preview.set_3d(None, f"3D preview: {e}"))
+
+
 # ==================================================================== BOM tab
 class BomTab(ttk.Frame):
+    BASE_COLS = [("item", "#", 34), ("refs", "References", 150), ("qty", "Qty", 40), ("need", "Need", 50),
+                 ("value", "Value", 110), ("footprint", "Footprint", 130), ("mount", "Type", 46),
+                 ("mfr", "Manufacturer", 110), ("mpn", "MPN", 140), ("lcsc", "LCSC", 75),
+                 ("digikey", "Digi-Key PN", 110), ("mouser", "Mouser PN", 110), ("desc", "Description", 200)]
+
     def __init__(self, parent, app: "App"):
         super().__init__(parent, padding=8)
         self.app = app
-        self.lines: list[libtools.BomLine] = []
+        self.lines: list[bom.BomLine] = []
         self.sources: list[str] = []
         self._gen = 0
         bar = ttk.Frame(self)
         bar.pack(fill="x")
-        ttk.Button(bar, text="Load BOM from project", command=self.load).pack(side="left")
+        ttk.Button(bar, text="↻ Load BOM from project", command=self.load).pack(side="left")
         ttk.Label(bar, text="   Boards to build:").pack(side="left")
         self.boards = tk.IntVar(value=app.settings.bom_boards or 1)
         sp = ttk.Spinbox(bar, from_=1, to=100000, textvariable=self.boards, width=7, command=self._redraw)
         sp.pack(side="left", padx=4)
         sp.bind("<KeyRelease>", lambda e: self._redraw())
+        self.show_dnp = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Show DNP", variable=self.show_dnp, command=self._redraw).pack(side="left", padx=6)
         ttk.Button(bar, text="Check stock & lead times", command=self.check, style="Accent.TButton").pack(
             side="left", padx=8)
-        ttk.Button(bar, text="Export CSV…", command=self.export).pack(side="left")
-        self.info = tk.StringVar(value="Uses the saved schematic of the selected project. Sources = the suppliers "
-                                       "ticked on the Search tab.")
-        ttk.Label(bar, textvariable=self.info, foreground="#555").pack(side="left", padx=10)
+        ttk.Button(bar, text="⬇ Export for board house / distributor…", command=self.export_dialog,
+                   style="Accent.TButton").pack(side="left")
+        ttk.Button(bar, text="Stock report…", command=self.export_stock).pack(side="left", padx=6)
+        self.info = tk.StringVar(value="Load the BOM of the selected project (reads the saved schematic and PCB).")
+        ttk.Label(self, textvariable=self.info, style="Muted.TLabel").pack(fill="x", pady=(6, 0))
         frame = ttk.Frame(self)
         frame.pack(fill="both", expand=True, pady=6)
         self.tree = ttk.Treeview(frame, show="headings")
@@ -544,20 +674,24 @@ class BomTab(ttk.Frame):
         self.tree.tag_configure("ok", background="#e3f4e8")
         self.tree.tag_configure("low", background="#fff1d6")
         self.tree.tag_configure("none", background="#fbe0e0")
-        self.tree.tag_configure("nompn", foreground="#888")
+        self.tree.tag_configure("nompn", foreground="#888888")
+        self.tree.tag_configure("dnp", foreground="#aaaaaa")
         self.tree.bind("<Double-1>", self._search_line)
         self._setup_columns()
 
+    def settings_changed(self) -> None:
+        self.boards.set(self.app.settings.bom_boards or 1)
+        self._redraw()
+
     def _setup_columns(self) -> None:
-        base = [("refs", "References", 160), ("qty", "Qty", 45), ("need", "Need", 55), ("value", "Value", 120),
-                ("mpn", "MPN", 150), ("mfr", "Manufacturer", 120)]
-        src_cols = [(f"s{i}", f"{s}  (stock | lead)", 150) for i, s in enumerate(self.sources)]
-        tail = [("best", "Best source", 150), ("status", "Status", 110)]
-        cols = base + src_cols + tail
+        src_cols = [(f"s{i}", f"{s} (stock | lead)", 140) for i, s in enumerate(self.sources)]
+        tail = [("best", "Best source", 140), ("status", "Status", 100)] if self.sources else []
+        cols = self.BASE_COLS + src_cols + tail
         self.tree["columns"] = [c[0] for c in cols]
         for cid, head, w in cols:
             self.tree.heading(cid, text=head)
-            self.tree.column(cid, width=w, stretch=cid in ("refs",), anchor="e" if cid in ("qty", "need") else "w")
+            self.tree.column(cid, width=w, stretch=cid in ("desc",),
+                             anchor="e" if cid in ("qty", "need", "item") else "w")
 
     def load(self) -> None:
         p = self.app.current_project()
@@ -565,27 +699,33 @@ class BomTab(ttk.Frame):
             messagebox.showinfo(APP_TITLE, "Select a project first.")
             return
         self.info.set(f"Reading BOM of {p.name}…")
-        self.app.run_bg(lambda: libtools.read_bom(p.pro_file, self.app.ki, self.app.settings), self._loaded,
+        self.app.run_bg(lambda: bom.read_bom(p.pro_file, self.app.ki, self.app.settings), self._loaded,
                         lambda e: (self.info.set("BOM export failed"), self.app._import_failed(e)))
 
-    def _loaded(self, lines: list[libtools.BomLine]) -> None:
-        self.lines = [l for l in lines if not l.dnp]
-        dnp = len(lines) - len(self.lines)
-        no_mpn = sum(1 for l in self.lines if not (l.mpn or l.lcsc))
-        self.info.set(f"{len(self.lines)} BOM lines ({dnp} DNP hidden, {no_mpn} without MPN/LCSC number). "
-                      "Double-click a line to search it.")
+    def _loaded(self, lines: list[bom.BomLine]) -> None:
+        self.lines = lines
+        dnp = sum(1 for l in lines if l.dnp)
+        no_mpn = sum(1 for l in lines if not l.dnp and not (l.mpn or l.lcsc))
+        parts = sum(l.qty for l in lines if not l.dnp)
+        self.info.set(f"{len(lines)} BOM lines, {parts} parts per board ({dnp} DNP lines, {no_mpn} without "
+                      "MPN/LCSC number). Double-click a line to search for it.")
         self._redraw()
 
-    def _need(self, ln: libtools.BomLine) -> int:
+    def visible_lines(self) -> list[bom.BomLine]:
+        return [l for l in self.lines if self.show_dnp.get() or not l.dnp]
+
+    def _need(self, ln: bom.BomLine) -> int:
         try:
             return ln.qty * max(int(self.boards.get()), 1)
         except (tk.TclError, ValueError):
             return ln.qty
 
-    def _best(self, ln: libtools.BomLine) -> tuple[str, str]:
-        offers = [(s, o) for s, o in ln.offers.items() if o is not None and not isinstance(o, str)]
+    def _best(self, ln: bom.BomLine) -> tuple[str, str]:
+        if ln.dnp:
+            return "", "dnp"
         if not (ln.mpn or ln.lcsc):
             return "", "no MPN"
+        offers = [(s, o) for s, o in ln.offers.items() if o is not None and not isinstance(o, str)]
         if not ln.offers:
             return "", ""
         need = self._need(ln)
@@ -607,7 +747,7 @@ class BomTab(ttk.Frame):
         except (tk.TclError, ValueError):
             pass
         self.tree.delete(*self.tree.get_children())
-        for n, ln in enumerate(self.lines):
+        for n, ln in enumerate(self.visible_lines(), start=1):
             cells = []
             for s in self.sources:
                 o = ln.offers.get(s)
@@ -617,13 +757,18 @@ class BomTab(ttk.Frame):
                     cells.append(o)
                 else:
                     cells.append(f"{o.stock_str or '0'} | {o.lead_str or '-'}")
-            best, status = self._best(ln)
-            label = {"ok": "✔ in stock", "low": "⚠ short", "none": "✖ none", "no MPN": "no MPN"}.get(
-                status, "")
-            tag = {"ok": "ok", "low": "low", "none": "none", "no MPN": "nompn"}.get(status, "")
-            self.tree.insert("", "end", iid=str(n), tags=(tag,) if tag else (), values=(
-                ln.refs, ln.qty, self._need(ln), ln.value, ln.mpn or (f"LCSC {ln.lcsc}" if ln.lcsc else ""),
-                ln.manufacturer, *cells, best, label))
+            tail = []
+            tag = "dnp" if ln.dnp else ""
+            if self.sources:
+                best, status = self._best(ln)
+                tail = [best, {"ok": "✔ in stock", "low": "⚠ short", "none": "✖ none",
+                               "no MPN": "no MPN", "dnp": "DNP"}.get(status, "")]
+                tag = {"ok": "ok", "low": "low", "none": "none", "no MPN": "nompn", "dnp": "dnp"}.get(status, "")
+            d = ln.data
+            self.tree.insert("", "end", iid=str(self.lines.index(ln)), tags=(tag,) if tag else (), values=(
+                n, ln.refs_str, ln.qty, self._need(ln), ln.value + ("  (DNP)" if ln.dnp else ""), ln.footprint_name,
+                ln.mount, ln.manufacturer, ln.mpn, d.get("lcsc", ""), d.get("digikey", ""), d.get("mouser", ""),
+                ln.description, *cells, *tail))
 
     def check(self) -> None:
         if not self.lines:
@@ -636,7 +781,7 @@ class BomTab(ttk.Frame):
         self._setup_columns()
         self._gen += 1
         gen = self._gen
-        todo = [l for l in self.lines if l.mpn or l.lcsc]
+        todo = [l for l in self.lines if not l.dnp and (l.mpn or l.lcsc)]
         for ln in todo:
             ln.offers = {s: None for s in self.sources}
         self._redraw()
@@ -645,14 +790,16 @@ class BomTab(ttk.Frame):
 
         def worker(name: str):
             prov = self.app.providers[name]
-            delay = 2.1 if name == "Mouser" else 0.3  # Mouser allows ~30 requests/minute
+            delay = 2.1 if name == "Mouser" else 0.6 if name == "Farnell/Newark" else 0.3
             for ln in todo:
                 if gen != self._gen:
                     return
                 q = ln.mpn or ln.lcsc
+                if name == "LCSC" and ln.lcsc:
+                    q = ln.lcsc
                 try:
                     res = prov.search(q, limit=10)
-                    if not ln.mpn and name == "LCSC":
+                    if q == ln.lcsc:
                         best = next((r for r in res if r.supplier_pn == ln.lcsc), None)
                     else:
                         best = providers.best_match(res, q)
@@ -668,31 +815,147 @@ class BomTab(ttk.Frame):
             remaining[0] -= 1
             if remaining[0] == 0 and gen == self._gen:
                 self._redraw()
-                states = [self._best(l)[1] for l in self.lines]
+                states = [self._best(l)[1] for l in self.lines if not l.dnp]
                 self.info.set(f"Done: {states.count('ok')} in stock, {states.count('low')} short, "
                               f"{states.count('none')} unavailable, {states.count('no MPN')} without MPN.")
                 self.app.settings.save()
         for name in self.sources:
             threading.Thread(target=worker, args=(name,), daemon=True).start()
 
-    def export(self) -> None:
-        if not self.lines:
+    def export_stock(self) -> None:
+        if not self.lines or not self.sources:
+            messagebox.showinfo(APP_TITLE, "Run 'Check stock & lead times' first.")
             return
         p = self.app.current_project()
-        f = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+        f = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx")],
                                          initialfile=f"{p.name if p else 'bom'}-stock.csv",
                                          initialdir=str(p.dir) if p else None)
         if f:
-            libtools.write_bom_report(self.lines, self.sources, max(int(self.boards.get()), 1), Path(f))
-            self.app.log(f"BOM stock report saved to {f}")
+            bom.write_stock_report([l for l in self.lines if not l.dnp], self.sources,
+                                   max(int(self.boards.get()), 1), Path(f))
+            self.app.log(f"Stock report saved to {f}")
             kicad_control.open_path(f)
+
+    def export_dialog(self) -> None:
+        if not self.lines:
+            messagebox.showinfo(APP_TITLE, "Load the BOM first.")
+            return
+        BomExportDialog(self.app, self)
 
     def _search_line(self, _e=None) -> None:
         sel = self.tree.selection()
         if not sel:
             return
         ln = self.lines[int(sel[0])]
-        q = ln.mpn or ln.lcsc or ln.value
-        self.app.search_var.set(q)
+        self.app.search_var.set(ln.mpn or ln.lcsc or ln.value)
         self.app.nb.select(0)
         self.app.search()
+
+
+class BomExportDialog(_ToolDialog):
+    def __init__(self, app: "App", tab: BomTab):
+        super().__init__(app, "Export BOM", "980x620")
+        self.tab = tab
+        s = app.settings
+        b = self.body
+        row = ttk.Frame(b)
+        row.pack(fill="x")
+        ttk.Label(row, text="Format:").pack(side="left")
+        self.fmt = ttk.Combobox(row, state="readonly", width=30, values=bom.FORMAT_NAMES)
+        self.fmt.set(s.bom_format if s.bom_format in bom.FORMAT_NAMES else bom.FORMAT_NAMES[0])
+        self.fmt.pack(side="left", padx=6)
+        self.fmt.bind("<<ComboboxSelected>>", lambda e: self._update())
+        self.ftype = tk.StringVar(value=s.bom_file_type)
+        ttk.Radiobutton(row, text="CSV", variable=self.ftype, value="csv").pack(side="left", padx=(12, 0))
+        ttk.Radiobutton(row, text="Excel (.xlsx)", variable=self.ftype, value="xlsx").pack(side="left", padx=6)
+        self.dnp = tk.BooleanVar(value=s.bom_include_dnp)
+        ttk.Checkbutton(row, text="Include DNP", variable=self.dnp, command=self._update).pack(side="left", padx=6)
+        self.cpl = tk.BooleanVar(value=s.bom_export_cpl)
+        self.cpl_check = ttk.Checkbutton(row, text="Also write pick-and-place (CPL) file", variable=self.cpl)
+        self.cpl_check.pack(side="left", padx=6)
+        self.notes = tk.StringVar()
+        ttk.Label(b, textvariable=self.notes, wraplength=940, justify="left", style="Muted.TLabel").pack(
+            fill="x", pady=(8, 2))
+        ttk.Button(b, text="Open the shop's BOM / upload page", command=self._open_url).pack(anchor="w")
+        ttk.Label(b, text="Preview:", style="Bold.TLabel").pack(anchor="w", pady=(8, 0))
+        pf = ttk.Frame(b)
+        pf.pack(fill="both", expand=True)
+        self.prev = ttk.Treeview(pf, show="headings", height=10)
+        xsb = ttk.Scrollbar(pf, orient="horizontal", command=self.prev.xview)
+        self.prev.configure(xscrollcommand=xsb.set)
+        self.prev.pack(fill="both", expand=True)
+        xsb.pack(fill="x")
+        self.warn = tk.StringVar()
+        ttk.Label(b, textvariable=self.warn, foreground="#b3261e", wraplength=940, justify="left").pack(
+            fill="x", pady=4)
+        out = ttk.Frame(b)
+        out.pack(fill="x", pady=(4, 0))
+        ttk.Label(out, text="Save to folder:").pack(side="left")
+        p = app.current_project()
+        self.out_dir = tk.StringVar(value=str((p.dir / "bom-exports") if p else Path.home()))
+        ttk.Entry(out, textvariable=self.out_dir).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(out, text="…", width=3, command=self._pick).pack(side="left")
+        bottom = ttk.Frame(b)
+        bottom.pack(fill="x", pady=(10, 0))
+        ttk.Label(bottom, textvariable=self.busy, foreground="#b3261e").pack(side="left")
+        ttk.Button(bottom, text="Export", command=self.export, style="Accent.TButton").pack(side="right")
+        self._update()
+
+    def _format(self) -> bom.BomFormat:
+        return bom.get_format(self.fmt.get())
+
+    def _update(self) -> None:
+        f = self._format()
+        boards = max(int(self.tab.boards.get() or 1), 1)
+        note = f.notes or ""
+        if f.multiply_qty:
+            note = f"Quantities are multiplied by the {boards} board(s) set on the BOM tab. " + note
+        self.notes.set(note)
+        self.cpl_check.state(["!disabled"] if f.cpl else ["disabled"])
+        rows = bom.bom_rows(self.tab.lines, f, boards, self.dnp.get())
+        self.prev.delete(*self.prev.get_children())
+        cols = [f"c{i}" for i in range(len(rows[0]))]
+        self.prev["columns"] = cols
+        for c, h in zip(cols, rows[0]):
+            self.prev.heading(c, text=h)
+            self.prev.column(c, width=120, stretch=True)
+        for r in rows[1:60]:
+            self.prev.insert("", "end", values=r)
+        miss = bom.missing_fields(self.tab.lines, f)
+        self.warn.set((f"{len(miss)} line(s) are missing data this shop needs: " + "; ".join(miss[:8]) +
+                       (" …" if len(miss) > 8 else "") +
+                       "  → add the fields in KiCad (or use Library Tools → Clean up to fill them).")
+                      if miss else "")
+
+    def _open_url(self) -> None:
+        import webbrowser
+        if self._format().url:
+            webbrowser.open(self._format().url)
+
+    def _pick(self) -> None:
+        d = filedialog.askdirectory(parent=self, initialdir=self.out_dir.get())
+        if d:
+            self.out_dir.set(str(Path(d)))
+
+    def export(self) -> None:
+        f = self._format()
+        s = self.app.settings
+        s.bom_format, s.bom_file_type, s.bom_include_dnp, s.bom_export_cpl = (
+            f.name, self.ftype.get(), self.dnp.get(), self.cpl.get())
+        s.save()
+        p = self.app.current_project()
+        base = p.name.replace(" ", "_") if p else "project"
+        out_dir = Path(self.out_dir.get())
+        want_cpl = self.cpl.get() and f.cpl and p
+        lines, boards, dnp, ftype = (self.tab.lines, max(int(self.tab.boards.get() or 1), 1), self.dnp.get(),
+                                     self.ftype.get())
+
+        def work():
+            places = bom.read_positions(p.pro_file, self.app.ki) if want_cpl else None
+            return bom.export(lines, f, out_dir, base, boards, dnp, ftype, places)
+
+        def done(paths):
+            self.app.log("Exported: " + ", ".join(str(x) for x in paths))
+            kicad_control.open_path(out_dir)
+            self.destroy()
+        self.run(work, done, "Exporting")

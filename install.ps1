@@ -1,11 +1,11 @@
-# KiCad Part Importer - automatic installer
+# Kiporter - Windows installer
 #  * finds (or installs) Python 3.9+
-#  * creates a private virtual environment in %LOCALAPPDATA%\KiCadPartImporter
+#  * creates a private virtual environment in %LOCALAPPDATA%\Kiporter
 #  * installs dependencies
-#  * creates Desktop + Start Menu shortcuts and launches the app
+#  * creates Desktop + Start Menu shortcuts (with the Kiporter logo) and launches the app
 $ErrorActionPreference = 'Stop'
 $AppDir  = $PSScriptRoot
-$DataDir = Join-Path $env:LOCALAPPDATA 'KiCadPartImporter'
+$DataDir = Join-Path $env:LOCALAPPDATA 'Kiporter'
 $Venv    = Join-Path $DataDir 'venv'
 
 function Find-Python {
@@ -21,7 +21,7 @@ function Find-Python {
     return $null
 }
 
-Write-Host '== KiCad Part Importer setup ==' -ForegroundColor Cyan
+Write-Host '== Kiporter setup ==' -ForegroundColor Cyan
 $py = Find-Python
 if (-not $py) {
     Write-Host 'Python 3.9+ not found - installing Python 3.12 for the current user via winget...'
@@ -46,31 +46,24 @@ Write-Host 'Installing dependencies...'
 & $vpy -m pip install --disable-pip-version-check -q -r (Join-Path $AppDir 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'pip install failed (check your internet connection / proxy).' }
 
-# Icon: borrow KiCad's if available
-$icon = $null
-foreach ($root in @("$env:ProgramFiles\KiCad", "$env:LOCALAPPDATA\Programs\KiCad")) {
-    if (Test-Path $root) {
-        $k = Get-ChildItem $root -Directory | Sort-Object { [version]($_.Name -replace '[^\d.]', '') } -Descending -ErrorAction SilentlyContinue |
-             ForEach-Object { Join-Path $_.FullName 'bin\kicad.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1
-        if ($k) { $icon = "$k,0"; break }
-    }
-}
-
+$icon = Join-Path $AppDir 'kiporter\assets\logo.ico'
 $shell = New-Object -ComObject WScript.Shell
-$targets = @(
-    (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KiCad Part Importer.lnk'),
-    (Join-Path ([Environment]::GetFolderPath('Programs')) 'KiCad Part Importer.lnk')
-)
-foreach ($lnkPath in $targets) {
+$desktop = [Environment]::GetFolderPath('Desktop')
+$programs = [Environment]::GetFolderPath('Programs')
+foreach ($dir in @($desktop, $programs)) {   # remove shortcuts from the pre-Kiporter name
+    $old = Join-Path $dir 'KiCad Part Importer.lnk'
+    if (Test-Path $old) { Remove-Item $old }
+}
+foreach ($lnkPath in @((Join-Path $desktop 'Kiporter.lnk'), (Join-Path $programs 'Kiporter.lnk'))) {
     $lnk = $shell.CreateShortcut($lnkPath)
     $lnk.TargetPath = $vpyw
     $lnk.Arguments = '"' + (Join-Path $AppDir 'run.pyw') + '"'
     $lnk.WorkingDirectory = $AppDir
-    $lnk.Description = 'Search LCSC / Digi-Key / Mouser and import parts into KiCad'
-    if ($icon) { $lnk.IconLocation = $icon }
+    $lnk.Description = 'Kiporter - search suppliers and import parts into KiCad'
+    if (Test-Path $icon) { $lnk.IconLocation = "$icon,0" }
     $lnk.Save()
     Write-Host "Shortcut: $lnkPath"
 }
 
-Write-Host 'Setup complete - launching KiCad Part Importer.' -ForegroundColor Green
+Write-Host 'Setup complete - launching Kiporter.' -ForegroundColor Green
 Start-Process -FilePath $vpyw -ArgumentList ('"' + (Join-Path $AppDir 'run.pyw') + '"') -WorkingDirectory $AppDir

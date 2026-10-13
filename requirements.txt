@@ -3,3 +3,5 @@ easyeda2kicad==1.0.1
 kicad-python>=0.4
 charset-normalizer>=3
 keyring>=24
+Pillow>=10
+openpyxl>=3.1

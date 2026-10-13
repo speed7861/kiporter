@@ -1,6 +1,7 @@
-"""Tkinter front-end for KiCad Part Importer."""
+"""Kiporter main window."""
 from __future__ import annotations
 
+import concurrent.futures
 import queue
 import threading
 import time
@@ -12,36 +13,40 @@ from tkinter import filedialog, messagebox, simpledialog
 import tkinter as tk
 from tkinter import ttk
 
-from . import fields, importers, kicad_control, kicad_env, library, providers
+from . import __version__, cad, fields, importers, kicad_control, kicad_env, library, providers, render, sexpr, ui
 from .config import Settings, app_data_dir
 from .providers import PartResult
 
-APP_TITLE = "KiCad Part Importer"
+APP_TITLE = "Kiporter"
 NEW_LIB = "➕  New library…"
 
-# results table: column id -> (heading, width, PartResult sort key)
+# results table: column id -> (heading, width, sort key)
 COLUMNS = {
     "source": ("Source", 66, lambda r: r.source),
     "mpn": ("MPN", 130, lambda r: r.mpn.lower()),
     "mfr": ("Manufacturer", 115, lambda r: r.manufacturer.lower()),
     "package": ("Package", 80, lambda r: r.package.lower()),
-    "desc": ("Description", 170, lambda r: r.description.lower()),
+    "cad": ("CAD", 82, lambda r: cad.score(r)),
     "stock": ("In stock", 78, lambda r: r.stock if r.stock is not None else -1),
     "lead": ("Lead time", 66, lambda r: r.lead_days if r.lead_days is not None else 10 ** 6),
     "price": ("Price", 60, lambda r: r.price if r.price is not None else 10 ** 9),
     "moq": ("MOQ", 42, lambda r: r.moq if r.moq is not None else 10 ** 9),
     "spn": ("Supplier PN", 100, lambda r: r.supplier_pn.lower()),
+    "desc": ("Description", 200, lambda r: r.description.lower()),
 }
 SOURCE_COLORS = {"LCSC": "#0b6e4f", "Digi-Key": "#b3261e", "Mouser": "#1f5fa8", "Newark": "#8a4b00",
                  "Farnell": "#8a4b00", "element14": "#8a4b00", "TME": "#5b2a86", "Octopart": "#00636e"}
+CAD_FILTERS = [("any", "All parts"), ("symfp", "Symbol + footprint"), ("symfp3d", "Symbol + footprint + 3D")]
 
 
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.settings = Settings.load()
-        self.ki = kicad_env.detect_kicad(self.settings.kicad_version)
+        ui.setup(self, self.settings)
+        self.ki = kicad_env.detect_kicad(self.settings.kicad_version, self.settings.kicad_cli_path)
         self.providers = providers.make_providers(self.settings)
+        self.cad_pool = concurrent.futures.ThreadPoolExecutor(max_workers=3)
 
         self.projects: list[kicad_env.ProjectInfo] = []
         self.results: dict[str, PartResult] = {}
@@ -52,22 +57,21 @@ class App(tk.Tk):
         self._pending_jobs = 0
         self._ipc_version = ""
         self._sort_col, self._sort_desc = "stock", True
+        self._resort_pending = False
         self._user_picked_project = False
         self._startup_prompted = False
+        self._preview_token = 0
+        self._preview_part: tuple | None = None  # (token, lcsc_id, staged part)
         self._pending_cad_part: tuple[PartResult, float] | None = None
         self._zip_seen: dict[str, float] = {}
         self._zip_sizes: dict[str, int] = {}
         self._watch_start = time.time()
 
-        self.title(APP_TITLE)
-        self.geometry("1360x860")
-        self.minsize(1000, 660)
-        try:
-            ttk.Style(self).theme_use("vista" if kicad_env.IS_WIN else "clam")
-        except tk.TclError:
-            pass
-        ttk.Style(self).configure("Accent.TButton", font=("Segoe UI", 9, "bold"))
+        self.title(f"{APP_TITLE} — KiCad part importer")
+        self.geometry("1440x900")
+        self.minsize(1050, 680)
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(50, self._pump_ui_queue)
         self.after(200, self._startup)
 
@@ -84,7 +88,7 @@ class App(tk.Tk):
 
     def _pump_ui_queue(self) -> None:
         try:
-            while True:
+            for _ in range(200):
                 cb, payload, tb = self._ui_q.get_nowait()
                 if tb is not None:
                     self.log(tb, quiet=True)
@@ -96,7 +100,7 @@ class App(tk.Tk):
                     cb(payload)
         except queue.Empty:
             pass
-        self.after(50, self._pump_ui_queue)
+        self.after(40, self._pump_ui_queue)
 
     def post(self, fn, *args) -> None:
         """Call fn(*args) on the Tk thread (safe from worker threads)."""
@@ -122,13 +126,25 @@ class App(tk.Tk):
     def set_status(self, msg: str) -> None:
         self.status_var.set(msg)
 
+    def _on_close(self) -> None:
+        cad.save_cache()
+        self.cad_pool.shutdown(wait=False, cancel_futures=True)
+        self.destroy()
+
     # ================================================================ layout
     def _build_ui(self) -> None:
-        pad = {"padx": 6, "pady": 4}
+        pad = {"padx": 5, "pady": 3}
 
-        # ---- project bar
-        top = ttk.LabelFrame(self, text="KiCad project")
-        top.pack(fill="x", padx=8, pady=(8, 4))
+        # ---- header: logo + project bar
+        head = ttk.Frame(self)
+        head.pack(fill="x", padx=8, pady=(8, 4))
+        logo = ui.load_logo(56)
+        if logo:
+            ttk.Label(head, image=logo).pack(side="left", padx=(0, 10))
+        else:
+            ttk.Label(head, text="Kiporter", style="Title.TLabel").pack(side="left", padx=(0, 12))
+        top = ttk.LabelFrame(head, text="KiCad project")
+        top.pack(side="left", fill="x", expand=True)
         self.project_var = tk.StringVar()
         self.project_combo = ttk.Combobox(top, textvariable=self.project_var, state="readonly")
         self.project_combo.grid(row=0, column=0, sticky="ew", **pad)
@@ -139,19 +155,17 @@ class App(tk.Tk):
         self.update_btn = ttk.Button(top, text="↻  Update PCB from Schematic",
                                      command=self.update_pcb, style="Accent.TButton")
         self.update_btn.grid(row=0, column=4, **pad)
-        ttk.Button(top, text="Suppliers…", command=self.open_accounts).grid(row=0, column=5, **pad)
-        ttk.Button(top, text="⚙ Settings", command=self.open_settings).grid(row=0, column=6, **pad)
         self.kicad_status_var = tk.StringVar(value="Detecting KiCad…")
-        ttk.Label(top, textvariable=self.kicad_status_var, foreground="#555").grid(
-            row=1, column=0, columnspan=7, sticky="w", padx=8, pady=(0, 4))
+        ttk.Label(top, textvariable=self.kicad_status_var, style="Muted.TLabel").grid(
+            row=1, column=0, columnspan=5, sticky="w", padx=8, pady=(0, 4))
         top.columnconfigure(0, weight=1)
 
-        # ---- log (packed before the notebook so it keeps its height)
+        # ---- log + status bar (packed before the notebook so they keep their height)
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(self, textvariable=self.status_var, anchor="w", relief="sunken").pack(fill="x", side="bottom")
         lf = ttk.LabelFrame(self, text="Log")
         lf.pack(fill="x", side="bottom", padx=8, pady=(2, 2))
-        self.log_text = tk.Text(lf, height=7, wrap="word", font=("Consolas", 9), state="disabled")
+        self.log_text = tk.Text(lf, height=6, wrap="word", font=ui.FONTS.get("mono"), state="disabled")
         self.log_text.pack(fill="both", expand=True, padx=4, pady=4)
 
         self.nb = ttk.Notebook(self)
@@ -160,18 +174,24 @@ class App(tk.Tk):
         self.nb.add(search_tab, text="  Search & Import  ")
         self._build_search_tab(search_tab)
 
-        from .tools_gui import BomTab, ToolsTab  # local import: tools_gui imports this module
+        from .settings_gui import SettingsTab
+        from .tools_gui import BomTab, ToolsTab
+        from .fab_gui import FabTab
+        self.bom_tab = BomTab(self.nb, self)
+        self.nb.add(self.bom_tab, text="  BOM  ")
+        self.fab_tab = FabTab(self.nb, self)
+        self.nb.add(self.fab_tab, text="  Fabrication  ")
         self.tools_tab = ToolsTab(self.nb, self)
         self.nb.add(self.tools_tab, text="  Library Tools  ")
-        self.bom_tab = BomTab(self.nb, self)
-        self.nb.add(self.bom_tab, text="  BOM Stock Check  ")
+        self.settings_tab = SettingsTab(self.nb, self)
+        self.nb.add(self.settings_tab, text="  Settings  ")
 
     def _build_search_tab(self, parent: ttk.Frame) -> None:
         sb = ttk.Frame(parent)
         sb.pack(fill="x", pady=(6, 2))
         ttk.Label(sb, text="Search:").pack(side="left")
         self.search_var = tk.StringVar()
-        ent = ttk.Entry(sb, textvariable=self.search_var, font=("Segoe UI", 11))
+        ent = ttk.Entry(sb, textvariable=self.search_var, font=ui.FONTS.get("big"))
         ent.pack(side="left", fill="x", expand=True, padx=6)
         ent.bind("<Return>", lambda e: self.search())
         ent.focus_set()
@@ -188,10 +208,15 @@ class App(tk.Tk):
             cb = ttk.Checkbutton(srcs, variable=v, command=self._sources_changed)
             cb.pack(side="left", padx=(6, 0))
             self.source_checks[name] = cb
+        ttk.Label(srcs, text="   Show:").pack(side="left")
+        self.cad_filter_combo = ttk.Combobox(srcs, state="readonly", width=24, values=[l for _, l in CAD_FILTERS])
+        self.cad_filter_combo.current(next((i for i, (k, _) in enumerate(CAD_FILTERS)
+                                            if k == self.settings.cad_filter), 0))
+        self.cad_filter_combo.pack(side="left", padx=4)
+        self.cad_filter_combo.bind("<<ComboboxSelected>>", lambda e: self._cad_filter_changed())
         self.in_stock_var = tk.BooleanVar(value=self.settings.in_stock_only)
         ttk.Checkbutton(srcs, text="In stock only", variable=self.in_stock_var,
-                        command=self._sources_changed).pack(side="left", padx=(18, 0))
-        ttk.Label(srcs, text="   (results are sorted by quantity in stock)", foreground="#666").pack(side="left")
+                        command=self._sources_changed).pack(side="left", padx=(8, 0))
         self._refresh_source_labels()
 
         pw = ttk.PanedWindow(parent, orient="horizontal")
@@ -201,7 +226,7 @@ class App(tk.Tk):
         self.tree = ttk.Treeview(res_frame, columns=list(COLUMNS), show="headings", selectmode="browse")
         for c, (h, w, _) in COLUMNS.items():
             self.tree.heading(c, text=h, command=lambda c=c: self._sort_clicked(c))
-            anchor = "e" if c in ("stock", "lead", "price", "moq") else "w"
+            anchor = "e" if c in ("stock", "lead", "price", "moq") else "center" if c == "cad" else "w"
             self.tree.column(c, width=w, stretch=(c == "desc"), anchor=anchor)
         ysb = ttk.Scrollbar(res_frame, orient="vertical", command=self.tree.yview)
         xsb = ttk.Scrollbar(res_frame, orient="horizontal", command=self.tree.xview)
@@ -211,18 +236,17 @@ class App(tk.Tk):
         xsb.grid(row=1, column=0, sticky="ew")
         res_frame.rowconfigure(0, weight=1)
         res_frame.columnconfigure(0, weight=1)
-        self.tree.bind("<<TreeviewSelect>>", lambda e: self._show_details())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._selection_changed())
         self.tree.bind("<Double-1>", lambda e: self.import_selected())
         for src, col in SOURCE_COLORS.items():
             self.tree.tag_configure(src, foreground=col)
-        self.tree.tag_configure("nostock", foreground="#999")
+        self.tree.tag_configure("nostock", foreground="#999999")
         pw.add(res_frame, weight=3)
 
         right = ttk.Frame(pw)
-        self.details = tk.Text(right, height=12, width=40, wrap="word", font=("Segoe UI", 9), relief="flat",
-                               background=self.cget("background"))
-        self.details.pack(fill="both", expand=True, padx=4)
-        self.details.configure(state="disabled")
+        from .preview_gui import PreviewPane
+        self.preview = PreviewPane(right, on_3d_requested=self._render_3d)
+        self.preview.pack(fill="both", expand=True, padx=2)
         links = ttk.Frame(right)
         links.pack(fill="x", pady=2)
         ttk.Button(links, text="Datasheet", command=lambda: self._open_selected("datasheet")).pack(side="left", padx=2)
@@ -230,30 +254,31 @@ class App(tk.Tk):
         ttk.Button(links, text="Find CAD elsewhere…", command=self.find_cad_elsewhere).pack(side="left", padx=2)
 
         imp = ttk.LabelFrame(right, text="Import into")
-        imp.pack(fill="x", pady=6, padx=2)
+        imp.pack(fill="x", pady=4, padx=2)
         self.target_var = tk.StringVar(value=self.settings.default_target)
         self.rb_project = ttk.Radiobutton(imp, text="Project library", variable=self.target_var,
                                           value="project", command=self._target_changed)
         self.rb_project.grid(row=0, column=0, sticky="w", padx=6, pady=2)
-        self.project_lib_combo = ttk.Combobox(imp, state="readonly", width=48)
+        self.project_lib_combo = ttk.Combobox(imp, state="readonly", width=46)
         self.project_lib_combo.grid(row=0, column=1, sticky="ew", padx=6, pady=2)
         self.project_lib_combo.bind("<<ComboboxSelected>>", lambda e: self._lib_picked("project"))
         self.rb_global = ttk.Radiobutton(imp, text="Local library", variable=self.target_var,
                                          value="global", command=self._target_changed)
         self.rb_global.grid(row=1, column=0, sticky="w", padx=6, pady=2)
-        self.global_lib_combo = ttk.Combobox(imp, state="readonly", width=48)
+        self.global_lib_combo = ttk.Combobox(imp, state="readonly", width=46)
         self.global_lib_combo.grid(row=1, column=1, sticky="ew", padx=6, pady=2)
         self.global_lib_combo.bind("<<ComboboxSelected>>", lambda e: self._lib_picked("global"))
         self.target_path_var = tk.StringVar()
-        ttk.Label(imp, textvariable=self.target_path_var, foreground="#555", wraplength=460).grid(
+        ttk.Label(imp, textvariable=self.target_path_var, style="Muted.TLabel", wraplength=470).grid(
             row=2, column=0, columnspan=2, sticky="w", padx=8)
         imp.columnconfigure(1, weight=1)
         opts = ttk.Frame(imp)
-        opts.grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
-        self.want_sym = tk.BooleanVar(value=True)
-        self.want_fp = tk.BooleanVar(value=True)
-        self.want_3d = tk.BooleanVar(value=True)
-        self.overwrite = tk.BooleanVar(value=False)
+        opts.grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=3)
+        s = self.settings
+        self.want_sym = tk.BooleanVar(value=s.import_symbol)
+        self.want_fp = tk.BooleanVar(value=s.import_footprint)
+        self.want_3d = tk.BooleanVar(value=s.import_3d)
+        self.overwrite = tk.BooleanVar(value=s.overwrite_existing)
         for text, var in (("Symbol", self.want_sym), ("Footprint", self.want_fp),
                           ("3D model", self.want_3d), ("Overwrite existing", self.overwrite)):
             ttk.Checkbutton(opts, text=text, variable=var).pack(side="left", padx=(0, 8))
@@ -267,24 +292,24 @@ class App(tk.Tk):
         self.watch_check.grid(row=5, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
         pw.add(right, weight=2)
 
-        def place_sash(e):  # once the tab has its real size, give the results table ~64%
+        def place_sash(e):  # once the tab has its real size, give the results table ~62%
             if e.width > 200:
-                pw.sashpos(0, int(e.width * 0.64))
+                pw.sashpos(0, int(e.width * 0.62))
                 pw.unbind("<Configure>")
         pw.bind("<Configure>", place_sash)
 
     # ================================================================ startup / setup
     def _startup(self) -> None:
         ki = self.ki
-        self.log(f"KiCad {ki.version} config: {ki.config_dir}")
-        self.log(f"kicad-cli: {ki.kicad_cli or 'not found'}")
+        self.log(f"Kiporter {__version__} • {ki.label}")
+        self.log(f"KiCad config: {ki.config_dir} • kicad-cli: {ki.kicad_cli or 'not found'}")
         if not ki.config_dir.exists():
             messagebox.showwarning(APP_TITLE, "Could not find a KiCad configuration folder.\n"
-                                   "Start KiCad once, then reopen this tool.")
+                                   "Start KiCad once, then reopen Kiporter.")
         if not self.settings.first_run_done:
             self.auto_setup(first_run=True)
         self.refresh_projects()
-        self.after(15000, self._auto_refresh)
+        self.after(max(5, self.settings.auto_refresh_s) * 1000, self._auto_refresh)
         self.after(2000, self._watch_tick)
 
     def auto_setup(self, first_run: bool = False) -> None:
@@ -310,13 +335,38 @@ class App(tk.Tk):
             notes.append("KiCad IPC API is enabled.")
         self.settings.first_run_done = True
         self.settings.save()
-        self.log("Auto-setup complete.")
+        self.log("Automatic setup complete.")
         if first_run:
-            msg = ("Welcome! Automatic setup finished:\n\n" + "\n\n".join(notes) +
+            msg = ("Welcome to Kiporter! Automatic setup finished:\n\n" + "\n\n".join(notes) +
                    "\n\nLCSC search works right away. Connect Digi-Key, Mouser and other suppliers "
-                   "for stock and lead times from them too.\n\nConnect suppliers now?")
+                   "(free API keys - step-by-step directions included) for their stock and lead times.\n\n"
+                   "Connect suppliers now?")
             if messagebox.askyesno(APP_TITLE, msg):
                 self.open_accounts()
+
+    def apply_settings(self) -> None:
+        """Push saved settings into the live UI."""
+        s = self.settings
+        new_ki = kicad_env.detect_kicad(s.kicad_version, s.kicad_cli_path)
+        if (new_ki.version, new_ki.cli) != (self.ki.version, self.ki.cli):
+            self.ki = new_ki
+            self.log(f"Using {new_ki.label}")
+            self.refresh_projects()
+        for name, flag in providers.ENABLE_FLAGS.items():
+            self.source_vars[name].set(getattr(s, flag))
+        self.in_stock_var.set(s.in_stock_only)
+        self.cad_filter_combo.current(next((i for i, (k, _) in enumerate(CAD_FILTERS) if k == s.cad_filter), 0))
+        self.want_sym.set(s.import_symbol)
+        self.want_fp.set(s.import_footprint)
+        self.want_3d.set(s.import_3d)
+        self.overwrite.set(s.overwrite_existing)
+        self.watch_var.set(s.watch_downloads)
+        self.target_var.set(s.default_target if self.current_project() or s.default_target == "global" else "global")
+        self._refresh_source_labels()
+        self.refresh_libraries()
+        self._apply_sort()
+        if hasattr(self, "bom_tab"):
+            self.bom_tab.settings_changed()
 
     def _prompt_destination(self) -> None:
         if self._startup_prompted or not self.settings.ask_target_on_startup:
@@ -337,7 +387,7 @@ class App(tk.Tk):
 
     def _auto_refresh(self) -> None:
         self.run_bg(lambda: kicad_env.detect_projects(self.ki), self._projects_loaded)
-        self.after(15000, self._auto_refresh)
+        self.after(max(5, self.settings.auto_refresh_s) * 1000, self._auto_refresh)
 
     def _projects_loaded(self, res) -> None:
         projects, status = res
@@ -389,7 +439,7 @@ class App(tk.Tk):
 
     def browse_project(self) -> None:
         f = filedialog.askopenfilename(title="Choose KiCad project",
-                                       filetypes=[("KiCad project", "*.kicad_pro"), ("All files", "*.*")])
+                                       filetypes=[("KiCad project", "*.kicad_pro"), ("All files", "*")])
         if not f:
             return
         p = Path(f)
@@ -431,6 +481,8 @@ class App(tk.Tk):
         self._target_changed()
         if hasattr(self, "tools_tab"):
             self.tools_tab.libraries_changed()
+        if hasattr(self, "fab_tab"):
+            self.fab_tab.refresh()
 
     @staticmethod
     def _fill_lib_combo(combo: ttk.Combobox, libs: list[library.LibraryTarget], choice: str) -> None:
@@ -496,10 +548,7 @@ class App(tk.Tk):
 
     def _target_changed(self) -> None:
         t = self._selected_target()
-        if t:
-            self.target_path_var.set(f"→ {t.sym_file}")
-        else:
-            self.target_path_var.set("")
+        self.target_path_var.set(f"→ {t.sym_file}" if t else "")
         if self.target_var.get() != self.settings.default_target:
             self.settings.default_target = self.target_var.get()
             self.settings.save()
@@ -532,6 +581,7 @@ class App(tk.Tk):
 
     def ensure_connected(self, names: list[str]) -> list[str]:
         """Prompt to connect enabled-but-unconfigured suppliers. Returns the usable ones."""
+        from .settings_gui import AccountsDialog
         usable = []
         for name in names:
             prov = self.providers[name]
@@ -539,10 +589,12 @@ class App(tk.Tk):
                 usable.append(name)
                 continue
             if name in self.settings.declined_connect:
-                self.log(f"{name} skipped: not connected (Suppliers… to connect).")
+                self.log(f"{name} skipped: not connected (Settings → Suppliers to connect).")
                 continue
-            if messagebox.askyesno(APP_TITLE, f"{name} is not connected yet.\n\n{prov.help_text}\n\n"
-                                              f"Connect {name} now? (Choose No to skip it from now on.)"):
+            if messagebox.askyesno(APP_TITLE, f"{name} is not connected yet.\n\nIt needs a free API key: you "
+                                              f"sign in with your normal {name} account and create one. "
+                                              f"Step-by-step directions are on the next screen.\n\n"
+                                              f"Connect {name} now? (No = skip it from now on.)"):
                 AccountsDialog(self, focus=name, wait=True)
                 if prov.configured:
                     usable.append(name)
@@ -568,11 +620,13 @@ class App(tk.Tk):
         gen = self._search_gen
         self.tree.delete(*self.tree.get_children())
         self.results.clear()
+        self.preview.clear()
         self._pending_jobs = len(names)
         self.set_status(f"Searching {', '.join(names)} for '{kw}'…")
+        limit = max(1, min(int(self.settings.search_limit or 50), 50))
         for name in names:
             prov = self.providers[name]
-            self.run_bg(lambda p=prov: p.search(kw), lambda res, n=name: self._add_results(gen, n, res),
+            self.run_bg(lambda p=prov: p.search(kw, limit), lambda res, n=name: self._add_results(gen, n, res),
                         lambda e, n=name: self._search_failed(gen, n, e))
 
     def _search_done_one(self, gen: int) -> None:
@@ -580,8 +634,16 @@ class App(tk.Tk):
             return
         self._pending_jobs -= 1
         if self._pending_jobs <= 0:
-            in_stock = sum(1 for r in self.results.values() if r.stock)
-            self.set_status(f"{len(self.results)} results ({in_stock} in stock) — double-click a part to import it")
+            self._update_count_status()
+
+    def _update_count_status(self) -> None:
+        shown = len(self.tree.get_children())
+        in_stock = sum(1 for r in self.results.values() if r.stock)
+        pending = sum(1 for r in self.results.values() if r.cad is None) if self.settings.check_cad else 0
+        msg = f"{shown} of {len(self.results)} results shown ({in_stock} in stock)"
+        if pending:
+            msg += f" • checking CAD models for {pending}…"
+        self.set_status(msg + " — double-click a part to import it")
 
     def _add_results(self, gen: int, name: str, res: list[PartResult]) -> None:
         if gen != self._search_gen:
@@ -592,12 +654,54 @@ class App(tk.Tk):
             iid = f"r{len(self.results)}"
             self.results[iid] = r
             tags = (r.source,) if r.stock else (r.source, "nostock")
-            self.tree.insert("", "end", iid=iid, tags=tags, values=(
-                r.source, r.mpn, r.manufacturer, r.package, r.description, r.stock_str, r.lead_str,
-                r.price_str, r.moq if r.moq is not None else "", r.supplier_pn))
+            self.tree.insert("", "end", iid=iid, tags=tags, values=self._row_values(r))
+            if self.settings.check_cad:
+                self.cad_pool.submit(self._check_cad, gen, iid, r)
         self._apply_sort()
         self.log(f"{name}: {len(res)} results")
         self._search_done_one(gen)
+
+    @staticmethod
+    def _row_values(r: PartResult) -> tuple:
+        return (r.source, r.mpn, r.manufacturer, r.package, cad.label(r), r.stock_str, r.lead_str, r.price_str,
+                r.moq if r.moq is not None else "", r.supplier_pn, r.description)
+
+    def _check_cad(self, gen: int, iid: str, r: PartResult) -> None:
+        if gen != self._search_gen:
+            return
+        try:
+            cad.check(r)
+        except Exception as e:  # noqa: BLE001
+            r.cad = cad.NONE
+            self.tlog(f"CAD check {r.mpn}: {e}")
+        self.post(self._cad_checked, gen, iid)
+
+    def _cad_checked(self, gen: int, iid: str) -> None:
+        if gen != self._search_gen or iid not in self.results:
+            return
+        if self.tree.exists(iid):
+            self.tree.set(iid, "cad", cad.label(self.results[iid]))
+        if not self._resort_pending:  # batch re-sorting/filtering while results stream in
+            self._resort_pending = True
+            self.after(400, self._deferred_resort)
+
+    def _deferred_resort(self) -> None:
+        self._resort_pending = False
+        self._apply_sort()
+        self._update_count_status()
+
+    def _cad_filter_changed(self) -> None:
+        self.settings.cad_filter = CAD_FILTERS[max(self.cad_filter_combo.current(), 0)][0]
+        self.settings.save()
+        self._apply_sort()
+        self._update_count_status()
+
+    def _passes(self, r: PartResult) -> bool:
+        need = {"symfp": 2, "symfp3d": 3}.get(self.settings.cad_filter, 0)
+        if not need:
+            return True
+        sc = cad.score(r)
+        return sc == -1 or sc >= need  # keep unknowns visible until their check finishes
 
     def _search_failed(self, gen: int, name: str, e: Exception) -> None:
         self.log(f"{name}: {e}")
@@ -607,12 +711,20 @@ class App(tk.Tk):
         if self._sort_col == col:
             self._sort_desc = not self._sort_desc
         else:
-            self._sort_col, self._sort_desc = col, col in ("stock",)
+            self._sort_col, self._sort_desc = col, col in ("stock", "cad")
         self._apply_sort()
 
     def _apply_sort(self) -> None:
+        if not hasattr(self, "tree"):
+            return
         key = COLUMNS[self._sort_col][2]
-        rows = sorted(self.tree.get_children(), key=lambda i: key(self.results[i]), reverse=self._sort_desc)
+        visible = [i for i, r in self.results.items() if self._passes(r)]
+        for i in set(self.results) - set(visible):
+            if self.tree.exists(i):
+                self.tree.detach(i)
+        # secondary key: stock, so equal CAD scores still show the most available part first
+        rows = sorted(visible, key=lambda i: (key(self.results[i]), COLUMNS["stock"][2](self.results[i])),
+                      reverse=self._sort_desc)
         for idx, i in enumerate(rows):
             self.tree.move(i, "", idx)
         for c, (h, _, _) in COLUMNS.items():
@@ -623,33 +735,105 @@ class App(tk.Tk):
         sel = self.tree.selection()
         return self.results.get(sel[0]) if sel else None
 
-    def _show_details(self) -> None:
+    # ================================================================ preview
+    def _selection_changed(self) -> None:
         r = self.selected_part()
-        self.details.configure(state="normal")
-        self.details.delete("1.0", "end")
-        if r:
-            names = fields.field_names(self.settings.field_names)
-            data = r.part_data()
-            lines = [r.mpn, r.manufacturer, "", r.description, ""]
-            for k, v in (("Source", r.source), ("Supplier PN", r.supplier_pn), ("In stock", r.stock_str),
-                         ("Lead time", r.lead_str), ("Price (1 pc)", r.price_str), ("MOQ", r.moq),
-                         ("Package", r.package), ("Category", r.category), ("Lifecycle", r.lifecycle),
-                         ("Datasheet", r.datasheet)):
-                if v not in ("", None):
-                    lines.append(f"{k}: {v}")
-            for k, v in r.extra.items():
-                if v:
-                    lines.append(f"{k}: {v}")
-            lines += ["", "Symbol fields written on import:"]
-            lines += [f"   {names[k]} = {data[k][:60]}" for k in fields.FIELD_ORDER if k in data]
-            if r.source != "LCSC":
-                lines += ["", "Import looks for the same MPN at LCSC (free EasyEDA CAD model); "
-                          "otherwise it opens SnapEDA / Ultra Librarian / SamacSys and auto-imports the "
-                          "zip you download."]
-            self.details.insert("1.0", "\n".join(lines))
-            self.details.tag_add("title", "1.0", "1.end")
-            self.details.tag_configure("title", font=("Segoe UI", 12, "bold"))
-        self.details.configure(state="disabled")
+        self._preview_token += 1
+        token = self._preview_token
+        self._preview_part = None
+        if not r:
+            return
+        self._show_details(r)
+        self.preview.set_photo(None, "Loading photo…" if r.image_url and self.settings.show_images
+                               else "No photo available")
+        msg = "Loading preview…" if self.settings.auto_preview else "Preview off (Settings → Search)"
+        self.preview.set_symbol(None, None, msg)
+        self.preview.set_footprint(None, msg)
+        self.preview.set_3d(None, "Open this tab to render the 3D model" if self.settings.preview_3d
+                            else "3D preview off (Settings → Search)")
+        # debounce: only load if the user stays on this row
+        self.after(250, lambda: self._load_preview(token, r))
+
+    def _load_preview(self, token: int, r: PartResult) -> None:
+        if token != self._preview_token:
+            return
+        if self.settings.show_images and r.image_url:
+            self.run_bg(lambda: cad.image_bytes(r.image_url),
+                        lambda data: token == self._preview_token and self.preview.set_photo(
+                            data, "No photo available"))
+        if not self.settings.auto_preview:
+            return
+
+        def work():
+            lcsc = cad.lcsc_for(r)
+            if not lcsc:
+                return None
+            return lcsc, cad.staged(lcsc)
+
+        def done(res):
+            if token != self._preview_token:
+                return
+            if not res:
+                msg = (f"No free EasyEDA model found for {r.mpn}.\nUse 'Find CAD elsewhere…' "
+                       "for SnapEDA / Ultra Librarian / SamacSys.")
+                self.preview.set_symbol(None, None, msg)
+                self.preview.set_footprint(None, msg)
+                self.preview.set_3d(None, msg)
+                return
+            lcsc, part = res
+            self._preview_part = (token, lcsc, part)
+            try:
+                lib = sexpr.parse(part.symbol_files[0].read_text(encoding="utf-8")) if part.symbol_files else None
+                names = render.symbol_names(lib) if lib else []
+                self.preview.set_symbol(lib, names[0] if names else None, "No symbol")
+                fpn = sexpr.parse(part.footprint_files[0].read_text(encoding="utf-8")) if part.footprint_files else None
+                self.preview.set_footprint(fpn, "No footprint")
+            except (ValueError, OSError) as e:
+                self.preview.set_symbol(None, None, f"Preview failed: {e}")
+            if self.preview.current_tab() == "3D":
+                self._render_3d()
+
+        def fail(e):
+            if token == self._preview_token:
+                self.preview.set_symbol(None, None, f"Preview failed: {e}")
+                self.preview.set_footprint(None, f"Preview failed: {e}")
+        self.run_bg(work, done, fail)
+
+    def _render_3d(self) -> None:
+        if not self.settings.preview_3d or not self._preview_part:
+            return
+        token, lcsc, part = self._preview_part
+        if token != self._preview_token:
+            return
+        if not part.footprint_files or not part.model_files:
+            self.preview.set_3d(None, "No 3D model available for this part")
+            return
+        out = cad.preview_dir() / f"{lcsc}.png"
+        if out.exists():
+            self.preview.set_3d(out)
+            return
+        self.preview.set_3d(None, "Rendering 3D view with kicad-cli…")
+        self.run_bg(lambda: render.render_3d(self.ki, part.footprint_files[0], out, part.model_files),
+                    lambda png: token == self._preview_token and self.preview.set_3d(png),
+                    lambda e: token == self._preview_token and self.preview.set_3d(None, f"3D preview: {e}"))
+
+    def _show_details(self, r: PartResult) -> None:
+        names = fields.field_names(self.settings.field_names)
+        data = r.part_data()
+        lines = [r.mpn, r.manufacturer, "", r.description, ""]
+        for k, v in (("Source", r.source), ("Supplier PN", r.supplier_pn), ("In stock", r.stock_str),
+                     ("Lead time", r.lead_str), ("Price (1 pc)", r.price_str), ("MOQ", r.moq),
+                     ("Package", r.package), ("CAD models", cad.label(r) + (f" (EasyEDA {r.cad_lcsc})"
+                                                                         if r.cad_lcsc else "")),
+                     ("Category", r.category), ("Lifecycle", r.lifecycle), ("Datasheet", r.datasheet)):
+            if v not in ("", None):
+                lines.append(f"{k}: {v}")
+        for k, v in r.extra.items():
+            if v:
+                lines.append(f"{k}: {v}")
+        lines += ["", "Symbol fields written on import:"]
+        lines += [f"   {names[k]} = {data[k][:60]}" for k in fields.FIELD_ORDER if k in data]
+        self.preview.set_details(lines)
 
     def _open_selected(self, attr: str) -> None:
         r = self.selected_part()
@@ -673,25 +857,25 @@ class App(tk.Tk):
             return
         self.set_status(f"Looking for {r.mpn} at LCSC/EasyEDA…")
 
-        def found(eq: PartResult | None):
-            if eq and messagebox.askyesno(
-                    APP_TITLE, f"Free CAD model found at LCSC/EasyEDA:\n\n  {eq.supplier_pn}  {eq.mpn}\n"
-                               f"  {eq.manufacturer}  {eq.package}\n\nImport it (with your {r.source} "
-                               f"part data)?\n\nChoose 'No' to download CAD from SnapEDA / Ultra Librarian / SamacSys instead."):
-                data = {**eq.part_data(), **r.part_data(), "lcsc": eq.supplier_pn}
-                self._import_lcsc(eq, eq.supplier_pn, data, target)
+        def found(lcsc: str):
+            if lcsc and messagebox.askyesno(
+                    APP_TITLE, f"Free CAD model found at LCSC/EasyEDA for {r.mpn}:  {lcsc}  ({cad.label(r)})\n\n"
+                               f"Import it with your {r.source} part data?\n\nChoose 'No' to download CAD from "
+                               "SnapEDA / Ultra Librarian / SamacSys instead."):
+                data = {**r.part_data(), "lcsc": lcsc}
+                self._import_lcsc(r, lcsc, data, target)
             else:
-                if not eq:
+                if not lcsc:
                     self.log(f"No LCSC/EasyEDA model for {r.mpn}.")
                 self.find_cad_elsewhere(r)
 
-        self.run_bg(lambda: providers.find_lcsc_equivalent(r.mpn), found)
+        self.run_bg(lambda: cad.lcsc_for(r), found)
 
     def _import_lcsc(self, r: PartResult, lcsc_id: str, data: dict, target: library.LibraryTarget) -> None:
-        self.set_status(f"Importing {lcsc_id} ({r.mpn}) from EasyEDA into {target.name}…")
-        self.log(f"Downloading EasyEDA CAD data for {lcsc_id} ({r.mpn})…")
+        self.set_status(f"Importing {lcsc_id} ({r.mpn}) into {target.name}…")
+        self.log(f"Importing EasyEDA CAD data for {lcsc_id} ({r.mpn})…")
         opts = self._install_opts()
-        self.run_bg(lambda: library.install(target, importers.stage_lcsc(lcsc_id, data), **opts),
+        self.run_bg(lambda: library.install(target, cad.staged(lcsc_id, data), **opts),
                     lambda res: self._import_done(res, target, r.mpn),
                     lambda e: self._import_failed(e))
 
@@ -764,7 +948,7 @@ class App(tk.Tk):
     def import_zip_dialog(self) -> None:
         f = filedialog.askopenfilename(title="Choose CAD model zip (SnapEDA, Ultra Librarian, SamacSys/Mouser)",
                                        initialdir=self.settings.watch_dir,
-                                       filetypes=[("Zip archives", "*.zip"), ("All files", "*.*")])
+                                       filetypes=[("Zip archives", "*.zip"), ("All files", "*")])
         if f:
             self.import_zip(Path(f), ask=False)
 
@@ -845,19 +1029,23 @@ class App(tk.Tk):
             self.update_btn.state(["!disabled"])
             self._import_failed(e)
 
-        self.run_bg(lambda: kicad_control.update_pcb_from_schematic(self.ki, p), done, fail)
+        s = self.settings
+        self.run_bg(lambda: kicad_control.update_pcb_from_schematic(self.ki, p, s.update_pcb_method,
+                                                                    s.update_pcb_hotkey), done, fail)
 
     # ================================================================ dialogs
-    def open_settings(self) -> None:
-        SettingsDialog(self)
+    def open_settings(self, page: str | None = None) -> None:
+        self.nb.select(self.settings_tab)
+        if page and page in self.settings_tab.pages:
+            self.settings_tab.nb.select(self.settings_tab.pages[page])
 
     def open_accounts(self, focus: str | None = None) -> None:
+        from .settings_gui import AccountsDialog
         AccountsDialog(self, focus=focus)
 
 
-# ==================================================================== dialogs
 class DestinationDialog(tk.Toplevel):
-    """Start-up question: where do imported parts go this session?"""
+    """Start-up question: which library do imported parts go to this session?"""
 
     def __init__(self, app: App):
         super().__init__(app)
@@ -868,8 +1056,8 @@ class DestinationDialog(tk.Toplevel):
         frm = ttk.Frame(self, padding=14)
         frm.pack(fill="both", expand=True)
         p = app.current_project()
-        ttk.Label(frm, text="Choose the library that new parts are imported into.",
-                  font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text="Choose the library that new parts are imported into.", style="Bold.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.kind = tk.StringVar(value=app.target_var.get() if p else "global")
         rb = ttk.Radiobutton(frm, text=f"Project library  ({p.name if p else 'no project detected'})",
                              variable=self.kind, value="project")
@@ -890,7 +1078,7 @@ class DestinationDialog(tk.Toplevel):
         self.pcombo.bind("<<ComboboxSelected>>", lambda e: self._picked("project"))
         self.gcombo.bind("<<ComboboxSelected>>", lambda e: self._picked("global"))
         self.ask = tk.BooleanVar(value=app.settings.ask_target_on_startup)
-        ttk.Checkbutton(frm, text="Ask me every time the app starts", variable=self.ask).grid(
+        ttk.Checkbutton(frm, text="Ask me every time Kiporter starts", variable=self.ask).grid(
             row=5, column=0, sticky="w", pady=(12, 0))
         ttk.Button(frm, text="OK", command=self._ok, style="Accent.TButton").grid(row=5, column=1, sticky="e",
                                                                                 pady=(12, 0))
@@ -925,201 +1113,6 @@ class DestinationDialog(tk.Toplevel):
         if t:
             self.app.log(f"Importing into {'project' if kind == 'project' else 'local'} library '{t.name}' ({t.sym_file})")
         self.destroy()
-
-
-class AccountsDialog(tk.Toplevel):
-    """Connect supplier accounts (API keys stored in the Windows Credential Manager)."""
-
-    def __init__(self, app: App, focus: str | None = None, wait: bool = False):
-        super().__init__(app)
-        self.app = app
-        self.title("Suppliers & accounts")
-        self.transient(app)
-        self.vars: dict[str, tk.StringVar] = {}
-        self.status: dict[str, tk.StringVar] = {}
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=10, pady=10)
-        s = app.settings
-        specs = {
-            "LCSC": [],
-            "Digi-Key": [("digikey_client_id", "Client ID"), ("digikey_client_secret", "Client Secret"),
-                         ("digikey_locale_site", "Locale site (US, CA, UK, DE…)"),
-                         ("digikey_currency", "Currency (USD, CAD, EUR…)")],
-            "Mouser": [("mouser_api_key", "Search API key")],
-            "Farnell/Newark": [("element14_api_key", "API key"),
-                               ("element14_store", "Store (www.newark.com, uk.farnell.com, …)")],
-            "TME": [("tme_token", "Token"), ("tme_app_secret", "App secret"), ("tme_country", "Country (US, PL…)"),
-                    ("tme_currency", "Currency")],
-            "Octopart": [("nexar_client_id", "Client ID"), ("nexar_client_secret", "Client Secret")],
-        }
-        for name, flds in specs.items():
-            prov = app.providers[name]
-            page = ttk.Frame(nb, padding=12)
-            nb.add(page, text=name)
-            ttk.Label(page, text=prov.help_text, justify="left", wraplength=520).grid(
-                row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
-            for r, (key, label) in enumerate(flds, start=1):
-                ttk.Label(page, text=label).grid(row=r, column=0, sticky="w", padx=(0, 8), pady=2)
-                v = tk.StringVar(value=str(getattr(s, key)))
-                self.vars[key] = v
-                secret = any(x in key for x in ("secret", "api_key", "token"))
-                ttk.Entry(page, textvariable=v, width=52, show="•" if secret else "").grid(
-                    row=r, column=1, sticky="ew", pady=2)
-            row = len(flds) + 1
-            st = tk.StringVar(value=("✔ Connected" if prov.configured else "Not connected") if flds else
-                              "✔ No account needed")
-            self.status[name] = st
-            ttk.Label(page, textvariable=st, foreground="#0b6e4f").grid(row=row, column=0, sticky="w", pady=(10, 0))
-            bf = ttk.Frame(page)
-            bf.grid(row=row, column=1, sticky="e", pady=(10, 0))
-            if prov.signup_url:
-                ttk.Button(bf, text="Sign in / get key…",
-                           command=lambda u=prov.signup_url: webbrowser.open(u)).pack(side="left", padx=3)
-            ttk.Button(bf, text="Test connection", command=lambda n=name: self._test(n)).pack(side="left", padx=3)
-            page.columnconfigure(1, weight=1)
-            if name == focus:
-                nb.select(page)
-        note = ("Keys are stored in the Windows Credential Manager." if s.secrets_in_keyring
-                else "Keys are stored in the settings file.")
-        foot = ttk.Frame(self)
-        foot.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Label(foot, text=note, foreground="#666").pack(side="left")
-        ttk.Button(foot, text="Close", command=self._close).pack(side="right")
-        ttk.Button(foot, text="Save", command=self._save, style="Accent.TButton").pack(side="right", padx=6)
-        self.protocol("WM_DELETE_WINDOW", self._close)
-        self.grab_set()
-        if wait:
-            self.wait_window()
-
-    def _apply(self) -> None:
-        s = self.app.settings
-        for k, v in self.vars.items():
-            setattr(s, k, v.get().strip())
-        for name, prov in self.app.providers.items():
-            if prov.configured and name in s.declined_connect:
-                s.declined_connect.remove(name)
-                self.app.source_vars[name].set(True)
-            if hasattr(prov, "reset"):
-                prov.reset()
-        self.app._sources_changed()
-        s.save()
-        self.app._refresh_source_labels()
-
-    def _save(self) -> None:
-        self._apply()
-        self.app.log("Supplier settings saved.")
-        for name, prov in self.app.providers.items():
-            if prov.key_fields:
-                self.status[name].set("✔ Connected" if prov.configured else "Not connected")
-
-    def _close(self) -> None:
-        self._apply()
-        self.destroy()
-
-    def _test(self, name: str) -> None:
-        self._apply()
-        self.status[name].set("Testing…")
-        prov = self.app.providers[name]
-        self.app.run_bg(prov.test, lambda msg: self.status[name].set("✔ " + msg),
-                        lambda e: self.status[name].set("✖ " + str(e)[:120]))
-
-
-class SettingsDialog(tk.Toplevel):
-    FIELDS = [
-        ("Default libraries", None),
-        ("global_lib_dir", "Default local library folder"),
-        ("global_lib_name", "Default local library nickname"),
-        ("project_lib_subdir", "Project library sub-folder"),
-        ("project_lib_name", "Default project library nickname"),
-        ("Downloads", None),
-        ("watch_dir", "Folder to watch for CAD zips"),
-    ]
-
-    def __init__(self, app: App):
-        super().__init__(app)
-        self.app = app
-        self.title("Settings")
-        self.transient(app)
-        self.vars: dict[str, tk.StringVar] = {}
-        frm = ttk.Frame(self, padding=12)
-        frm.pack(fill="both", expand=True)
-        row = 0
-        for key, label in self.FIELDS:
-            if label is None:
-                ttk.Label(frm, text=key, font=("Segoe UI", 10, "bold")).grid(
-                    row=row, column=0, sticky="w", pady=(10 if row else 0, 2))
-                row += 1
-                continue
-            ttk.Label(frm, text=label).grid(row=row, column=0, sticky="w", padx=(12, 6))
-            v = tk.StringVar(value=str(getattr(app.settings, key)))
-            self.vars[key] = v
-            ttk.Entry(frm, textvariable=v, width=60).grid(row=row, column=1, columnspan=2, sticky="ew", pady=1)
-            if key in ("global_lib_dir", "watch_dir"):
-                ttk.Button(frm, text="…", width=3,
-                           command=lambda v=v: self._pick_dir(v)).grid(row=row, column=3, sticky="w")
-            row += 1
-
-        ttk.Label(frm, text="Symbol field names (same for every supplier)", font=("Segoe UI", 10, "bold")).grid(
-            row=row, column=0, sticky="w", pady=(10, 2))
-        row += 1
-        names = fields.field_names(app.settings.field_names)
-        self.field_vars: dict[str, tk.StringVar] = {}
-        labels = {"manufacturer": "Manufacturer", "mpn": "Manufacturer part number", "description": "Description",
-                  "datasheet": "Datasheet", "package": "Package", "lcsc": "LCSC part #",
-                  "digikey": "Digi-Key part #", "mouser": "Mouser part #", "farnell": "Farnell/Newark part #",
-                  "tme": "TME part #"}
-        for i, key in enumerate(fields.FIELD_ORDER):
-            r, c = row + i // 2, (i % 2) * 2
-            ttk.Label(frm, text=labels[key]).grid(row=r, column=c, sticky="w", padx=(12, 6))
-            v = tk.StringVar(value=names[key])
-            self.field_vars[key] = v
-            ttk.Entry(frm, textvariable=v, width=22).grid(row=r, column=c + 1, sticky="w", pady=1)
-        row += (len(fields.FIELD_ORDER) + 1) // 2
-        self.drop_junk = tk.BooleanVar(value=app.settings.drop_junk_fields)
-        ttk.Checkbutton(frm, text="Remove stale vendor fields (price/stock links, SnapEDA/Arrow links) on import",
-                        variable=self.drop_junk).grid(row=row, column=0, columnspan=4, sticky="w", padx=12, pady=(4, 0))
-        row += 1
-        self.ask_target = tk.BooleanVar(value=app.settings.ask_target_on_startup)
-        ttk.Checkbutton(frm, text="Ask which library to import into when the app starts",
-                        variable=self.ask_target).grid(row=row, column=0, columnspan=4, sticky="w", padx=12)
-        row += 1
-
-        bf = ttk.Frame(frm)
-        bf.grid(row=row, column=0, columnspan=4, sticky="e", pady=(12, 0))
-        ttk.Button(bf, text="Re-run auto setup", command=self._rerun_setup).pack(side="left", padx=4)
-        ttk.Button(bf, text="Open log", command=lambda: kicad_control.open_path(app_data_dir() / "log.txt")).pack(
-            side="left", padx=4)
-        ttk.Button(bf, text="Save", command=self._save, style="Accent.TButton").pack(side="left", padx=4)
-        ttk.Button(bf, text="Cancel", command=self.destroy).pack(side="left", padx=4)
-        frm.columnconfigure(1, weight=1)
-        self.grab_set()
-
-    def _pick_dir(self, v: tk.StringVar) -> None:
-        d = filedialog.askdirectory(initialdir=v.get() or str(Path.home()), parent=self)
-        if d:
-            v.set(str(Path(d)))
-
-    def _apply(self) -> None:
-        s = self.app.settings
-        for k, v in self.vars.items():
-            setattr(s, k, v.get().strip())
-        s.field_names = {k: v.get().strip() for k, v in self.field_vars.items()
-                         if v.get().strip() and v.get().strip() != fields.DEFAULT_FIELD_NAMES[k]}
-        s.drop_junk_fields = self.drop_junk.get()
-        s.ask_target_on_startup = self.ask_target.get()
-        s.save()
-        self.app.refresh_libraries()
-
-    def _save(self) -> None:
-        self._apply()
-        self.app.log("Settings saved.")
-        self.destroy()
-
-    def _rerun_setup(self) -> None:
-        self._apply()
-        self.app.auto_setup()
-        self.app.refresh_libraries()
-        messagebox.showinfo(APP_TITLE, "Auto setup finished - see the log for details.", parent=self)
 
 
 def main() -> None:

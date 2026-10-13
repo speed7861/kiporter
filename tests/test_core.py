@@ -1,0 +1,163 @@
+"""Offline tests (no network, no KiCad needed) - run on Windows, macOS and Linux in CI."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from kiporter import bom, fields, kicad_env, library, providers, render, sexpr
+
+ASSETS = Path(__file__).resolve().parent.parent / "kiporter" / "assets"
+
+SYM_LIB = """(kicad_symbol_lib (version 20241209) (generator "test")
+  (symbol "OPAMP" (pin_names (offset 0.508))
+    (property "Reference" "U" (at 0 5 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "OPAMP" (at 0 -5 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "old:SOIC-8" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
+    (property "MFGR" "TI" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Mouser Price/Stock" "https://x" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
+    (symbol "OPAMP_0_1" (rectangle (start -5 5) (end 5 -5) (stroke (width 0.25)) (fill (type background))))
+    (symbol "OPAMP_1_1"
+      (pin input line (at -7.62 2.54 0) (length 2.54) (name "IN+" (effects (font (size 1 1)))) (number "3" (effects (font (size 1 1)))))
+      (pin output line (at 7.62 0 180) (length 2.54) (name "OUT" (effects (font (size 1 1)))) (number "1" (effects (font (size 1 1)))))
+      (arc (start 0 1) (mid 1 0) (end 0 -1))
+    )
+  )
+)
+"""
+
+FOOTPRINT = """(footprint "SOIC-8" (layer "F.Cu")
+  (fp_line (start -2 -2.5) (end 2 -2.5) (stroke (width 0.12) (type solid)) (layer "F.SilkS"))
+  (fp_arc (start -1 0) (mid 0 1) (end 1 0) (stroke (width 0.1) (type solid)) (layer "F.Fab"))
+  (pad "1" smd roundrect (at -2.7 -1.905) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+  (pad "2" thru_hole circle (at 2.7 1.905 90) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask"))
+  (model "${KICAD9_3DMODEL_DIR}/Package_SO.3dshapes/SOIC-8.step" (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))
+)
+"""
+
+
+def test_sexpr_roundtrip():
+    node = sexpr.parse(SYM_LIB)
+    again = sexpr.parse(sexpr.dump(node))
+    assert again == node
+    assert sexpr.unquote('"a\\"b"') == 'a"b'
+    assert sexpr.quote('a"b') == '"a\\"b"'
+
+
+def test_field_normalisation_and_order():
+    lib = sexpr.parse(SYM_LIB)
+    sym = sexpr.children(lib, "symbol")[0]
+    names = fields.field_names()
+    changes = fields.normalize_symbol(sym, names)
+    assert any("MFGR" in c for c in changes)
+    fields.apply_part_data(sym, {"mpn": "LM358", "mouser": "595-LM358", "lcsc": "C7950"}, names)
+    props = [sexpr.unquote(p[1]) for p in sexpr.children(sym, "property")]
+    assert "Mouser Price/Stock" not in props and "MFGR" not in props
+    assert props.index("Manufacturer") < props.index("MPN") < props.index("LCSC Part") < props.index("Mouser PN")
+    assert fields.get_property(sym, "Manufacturer") == "TI"
+
+
+def test_install_links_symbol_footprint_and_model(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "OPAMP.kicad_sym").write_text(SYM_LIB, encoding="utf-8")
+    (src / "SOIC-8.kicad_mod").write_text(FOOTPRINT, encoding="utf-8")
+    (src / "SOIC-8.step").write_text("ISO-10303-21;", encoding="utf-8")
+    target = library._make("project", "Proj", tmp_path / "lib", "${KIPRJMOD}/lib", tmp_path)
+    part = library.StagedPart([src / "OPAMP.kicad_sym"], [src / "SOIC-8.kicad_mod"], [src / "SOIC-8.step"],
+                              {"mpn": "LM358", "manufacturer": "TI"})
+    res = library.install(target, part)
+    assert res.symbols == ["Proj:OPAMP"] and res.footprints == ["Proj:SOIC-8"]
+    sym = sexpr.children(sexpr.parse(target.sym_file.read_text(encoding="utf-8")), "symbol")[0]
+    assert fields.get_property(sym, "Footprint") == "Proj:SOIC-8"
+    fp = sexpr.parse((target.fp_dir / "SOIC-8.kicad_mod").read_text(encoding="utf-8"))
+    assert sexpr.unquote(sexpr.child(fp, "model")[1]) == "${KIPRJMOD}/lib/Proj.3dshapes/SOIC-8.step"
+    assert kicad_env.lib_table_has(tmp_path / "sym-lib-table", "Proj")
+    assert library.install(target, part).skipped  # second time: already there
+
+
+def test_lib_table_edit(tmp_path):
+    t = tmp_path / "fp-lib-table"
+    assert kicad_env.ensure_lib_table_entry(t, "fp", "A", "${KIPRJMOD}/A.pretty")
+    assert not kicad_env.ensure_lib_table_entry(t, "fp", "A", "${KIPRJMOD}/A.pretty")
+    assert kicad_env.remove_lib_table_entry(t, "A")
+    assert not kicad_env.lib_table_has(t, "A")
+
+
+def test_env_expand():
+    env = {"KIPRJMOD": "/p", "X": "/x"}
+    assert kicad_env.expand("${KIPRJMOD}/a/$(X)/b", env) == "/p/a//x/b"
+    assert kicad_env.resolve("${NOPE}/a", env) is None
+
+
+def test_provider_helpers():
+    assert providers._float("$1,234.50") == 1234.5
+    assert providers._float("0,52 €") == 0.52
+    assert providers._int("1,234 In Stock") == 1234
+    assert providers._lead_days("12 Weeks") == 84
+    assert providers.normalize_package('8-SOIC (0.154", 3.90mm Width)') == "SOIC-8"
+    r = providers.PartResult("Mouser", "LM358DT", "ST", supplier_pn="511-LM358DT", stock=5000, lead_days=70,
+                             price=0.5, currency="USD")
+    assert r.part_data()["mouser"] == "511-LM358DT"
+    assert r.stock_str == "5,000" and r.lead_str == "10 wk" and r.price_str == "$0.5"
+    best = providers.best_match([providers.PartResult("X", "LM358DT", stock=1), r], "lm358dt")
+    assert best is r
+
+
+def test_renderers_build_geometry():
+    lib = sexpr.parse(SYM_LIB)
+    d = render.symbol_drawing(lib, "OPAMP")
+    assert d.items and d.bbox()[0] < -7
+    fp = render.footprint_drawing(sexpr.parse(FOOTPRINT))
+    assert fp.items
+    pts = render.arc_points((1, 0), (0, 1), (-1, 0))
+    assert abs(pts[len(pts) // 2][1] - 1) < 1e-6
+
+
+def test_signature_logo_footprint_renders():
+    fp = sexpr.parse((ASSETS / "signature.kicad_mod").read_text(encoding="utf-8"))
+    d = render.footprint_drawing(fp)
+    assert len([i for i in d.items if i[0] == "poly"]) >= 3
+    assert (ASSETS / "logo.png").exists()
+
+
+def _lines():
+    return [bom.BomLine(["R1", "R2"], 2, "10k", "Lib:R_0603", data={"mpn": "RC0603FR-0710KL", "lcsc": "C25804",
+                                                                     "manufacturer": "YAGEO"}, mount="SMD"),
+            bom.BomLine(["J1"], 1, "CONN", "Lib:Conn", data={}, mount="THT"),
+            bom.BomLine(["U9"], 1, "NC", "Lib:SOT23", dnp=True)]
+
+
+@pytest.mark.parametrize("fmt", bom.FORMATS, ids=lambda f: f.name)
+def test_bom_formats(fmt, tmp_path):
+    rows = bom.bom_rows(_lines(), fmt, boards=3)
+    assert len(rows) == 3  # header + 2 populated lines
+    assert all(len(r) == len(fmt.columns) for r in rows)
+    out = bom.export(_lines(), fmt, tmp_path, "proj", 3, file_type="csv",
+                     places=[bom.Placement("R1", "10k", "R_0603", 1.0, -2.0, 90, "top")])
+    assert all(p.exists() for p in out)
+
+
+def test_bom_quantities_and_cpl():
+    jlc = bom.get_format("JLCPCB")
+    assert bom.bom_rows(_lines(), jlc)[1] == ["10k", "R1,R2", "R_0603", "C25804"]
+    dk = bom.get_format("Digi-Key BOM Manager")
+    assert bom.bom_rows(_lines(), dk, boards=5)[1][0] == 10
+    cpl = bom.cpl_rows([bom.Placement("R1", "10k", "R_0603", 1.5, -2.25, 90, "bottom")], "JLCPCB")
+    assert cpl[1] == ["R1", "1.5000mm", "-2.2500mm", "Bottom", "90"]
+    assert bom.missing_fields(_lines(), jlc) == ["J1: no lcsc"]
+
+
+def test_platform_detection_does_not_crash():
+    installs = kicad_env.find_installs()
+    assert isinstance(installs, list)
+    ki = kicad_env.detect_kicad()
+    assert ki.version and ki.major >= 5
+    assert isinstance(kicad_env.kicad_window_titles(), list)
+    assert kicad_env.window_project_names("Power [Board 1.1/Power] — Schematic Editor") >= {"Board 1.1"}
+
+
+@pytest.mark.parametrize("mod", ["gui", "settings_gui", "tools_gui", "fab_gui", "preview_gui", "fab", "cad"])
+def test_modules_import(mod):
+    import importlib
+    assert importlib.import_module(f"kiporter.{mod}")

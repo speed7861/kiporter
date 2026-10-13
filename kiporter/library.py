@@ -57,11 +57,11 @@ class LibraryTarget:
         if not self.sym_file.exists():
             self.sym_file.write_text(
                 f'(kicad_symbol_lib\n\t(version {EMPTY_SYM_LIB_VERSION})\n'
-                f'\t(generator "kicad_part_importer")\n)\n', encoding="utf-8")
+                f'\t(generator "kiporter")\n)\n', encoding="utf-8")
             msgs.append(f"Created symbol library {self.sym_file}")
         if not self.existing:
             self.table_dir.mkdir(parents=True, exist_ok=True)
-            descr = "Parts imported by KiCad Part Importer"
+            descr = "Parts imported by Kiporter"
             if ensure_lib_table_entry(self.table_dir / "sym-lib-table", "sym", self.name, self.sym_uri, descr):
                 msgs.append(f"Registered symbol library '{self.name}' in {self.table_dir / 'sym-lib-table'}")
             if ensure_lib_table_entry(self.table_dir / "fp-lib-table", "fp", self.fp_name, self.fp_uri, descr):

@@ -19,7 +19,7 @@ import requests
 
 from .config import Settings
 
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) KiCadPartImporter/2.0"}
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Kiporter/2.0"}
 TIMEOUT = 25
 
 
@@ -54,7 +54,11 @@ class PartResult:
     url: str = ""
     lcsc_id: str = ""
     lifecycle: str = ""
+    image_url: str = ""
     extra: dict = field(default_factory=dict)
+    # CAD availability (filled in the background): (symbol, footprint, 3D model) and the LCSC part used
+    cad: tuple | None = None
+    cad_lcsc: str = ""
 
     def __post_init__(self) -> None:
         # one package spelling for every supplier: "8-SOIC (0.154\", 3.90mm)" -> "SOIC-8"
@@ -240,6 +244,8 @@ class LCSC(Provider):
                 datasheet=it.get("dataManualUrl") or it.get("dataManualOfficialLink") or "",
                 url=it.get("lcscGoodsUrl") or f"https://www.lcsc.com/product-detail/{code}.html",
                 lcsc_id=code,
+                image_url=(f"https://jlcpcb.com/api/file/downloadByFileSystemAccessId/{it['productBigImageAccessId']}"
+                           if it.get("productBigImageAccessId") else ""),
                 extra={
                     "JLCPCB library": {"base": "Basic", "expand": "Extended"}.get(lib_type, lib_type),
                     "Attributes": "; ".join(f"{a.get('attribute_name_en')}: {a.get('attribute_value_name')}"
@@ -369,6 +375,7 @@ class DigiKey(Provider):
                 datasheet=p.get("DatasheetUrl") or "",
                 url=p.get("ProductUrl") or "",
                 lifecycle=(p.get("ProductStatus") or {}).get("Status", ""),
+                image_url=p.get("PhotoUrl") or "",
                 extra={
                     "Detailed": desc.get("DetailedDescription", ""),
                     "Attributes": "; ".join(f"{x.get('ParameterText')}: {x.get('ValueText')}" for x in params),
@@ -425,6 +432,7 @@ class Mouser(Provider):
                 datasheet=p.get("DataSheetUrl") or "",
                 url=p.get("ProductDetailUrl") or "",
                 lifecycle=p.get("LifecycleStatus") or "",
+                image_url=p.get("ImagePath") or "",
                 extra={"Attributes": "; ".join(f"{k}: {v}" for k, v in attrs.items())},
             ))
         return out
@@ -492,6 +500,8 @@ class Element14(Provider):
                 datasheet=ds[0].get("url", "") if ds else "",
                 url=f"https://{store}/{sku}" if sku else "",
                 lifecycle=p.get("productStatus", ""),
+                image_url=(f"https://{store}/productimages/standard/en_GB{(p.get('image') or {}).get('baseName')}"
+                           if (p.get("image") or {}).get("baseName") else ""),
                 extra={"Attributes": "; ".join(f"{k}: {v}" for k, v in attrs.items())},
             ))
         return out
@@ -561,6 +571,7 @@ class TME(Provider):
                 moq=_int(p.get("MinAmount")),
                 supplier_pn=p.get("Symbol", ""),
                 url=("https:" + page) if page.startswith("//") else page,
+                image_url=("https:" + p["Photo"]) if str(p.get("Photo", "")).startswith("//") else p.get("Photo", ""),
             ))
         return out
 
@@ -572,7 +583,7 @@ query Search($q: String!, $limit: Int!) {
     results { part {
       mpn manufacturer { name } shortDescription category { name }
       bestDatasheet { url } octopartUrl totalAvail estimatedFactoryLeadDays
-      medianPrice1000 { price currency }
+      medianPrice1000 { price currency } bestImage { url }
       specs { attribute { shortname } displayValue }
     } }
   }
@@ -645,6 +656,7 @@ class Nexar(Provider):
                 datasheet=(p.get("bestDatasheet") or {}).get("url", ""),
                 url=p.get("octopartUrl", ""),
                 lifecycle=specs.get("lifecyclestatus", ""),
+                image_url=(p.get("bestImage") or {}).get("url", ""),
                 extra={"Note": "Stock is the total across all distributors; price is the median @1000."},
             ))
         return out

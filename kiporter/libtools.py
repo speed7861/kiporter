@@ -4,13 +4,11 @@
 * merge                  - combine several libraries into one (with 3D models)
 * remap project          - point a project's schematic/PCB at renamed/merged libraries
 * localize project       - copy every part a project uses into its project library
-* BOM check              - stock / lead time / price for every BOM line
 * backup                 - zip a library (symbols + footprints + 3D models)
 """
 from __future__ import annotations
 
 import copy
-import csv
 import re
 import shutil
 import subprocess
@@ -64,12 +62,12 @@ def backup_files(files: list[Path], backup_root: Path) -> Path:
 
 def validate_sym_lib(ki: KiCadInstall, sym_file: Path) -> str | None:
     """Parse a symbol library with kicad-cli; returns an error message or None."""
-    if not ki.kicad_cli or not sym_file.exists():
+    if not ki.cli or not sym_file.exists():
         return None
     with tempfile.TemporaryDirectory() as td:
         try:
-            r = subprocess.run([str(ki.kicad_cli), "sym", "upgrade", "--force", str(sym_file), "-o",
-                                str(Path(td) / "check.kicad_sym")], capture_output=True, text=True,
+            r = subprocess.run(ki.cli_cmd("sym", "upgrade", "--force", sym_file, "-o",
+                                          Path(td) / "check.kicad_sym"), capture_output=True, text=True,
                                timeout=180, creationflags=NO_WINDOW)
         except (OSError, subprocess.SubprocessError) as e:
             return str(e)
@@ -145,7 +143,7 @@ class StockModels:
     def __init__(self, ki: KiCadInstall):
         self.var = f"${{KICAD{ki.major}_3DMODEL_DIR}}"
         self.by_stem: dict[str, str] = {}
-        root = ki.root / "share" / "kicad" / "3dmodels" if ki.root else None
+        root = ki.share_dir / "3dmodels" if ki.share_dir else None
         if root and root.is_dir():
             for d in root.glob("*.3dshapes"):
                 for f in d.iterdir():
@@ -356,7 +354,7 @@ def apply_fixes(target: LibraryTarget, issues: list[Issue], ki: KiCadInstall, se
     fp_actions = ("add_model", "set_model", "add_model_uri", "set_model_uri")
     to_backup = [target.sym_file] + [target.fp_dir / f"{i.action[1]}.kicad_mod" for i in chosen
                                      if i.action[0] in fp_actions]
-    bdir = backup_files(to_backup, target.base_dir / ".partimporter-backup")
+    bdir = backup_files(to_backup, target.base_dir / ".kiporter-backup")
     log(f"Backup written to {bdir}")
 
     sym_actions = [i.action for i in chosen if i.action[0] in ("normalize", "set_fp", "fill")]
@@ -508,7 +506,7 @@ def merge_libraries(sources: list[LibraryTarget], dest: LibraryTarget, ki: KiCad
     names = fields.field_names(settings.field_names)
     for m in dest.ensure():
         log(m)
-    backup = backup_files([dest.sym_file], dest.base_dir / ".partimporter-backup")
+    backup = backup_files([dest.sym_file], dest.base_dir / ".kiporter-backup")
     log(f"Backup of destination: {backup}")
     env = kicad_env_vars(ki, project_dir)
     fpx = FootprintIndex(ki, project_dir)
@@ -688,7 +686,7 @@ def remap_project(project_dir: Path, sym_map: dict[str, str], fp_map: dict[str, 
                   model_map: dict[str, str] | None = None, log: Log = _nolog) -> int:
     check_project_closed(project_dir)
     schs, pcbs = project_files(project_dir)
-    bdir = backup_files(schs + pcbs, project_dir / "part-importer-backup")
+    bdir = backup_files(schs + pcbs, project_dir / "kiporter-backup")
     log(f"Project backup: {bdir}")
     total = 0
     for f in schs:
@@ -804,79 +802,12 @@ def localize_project(project_dir: Path, target: LibraryTarget, ki: KiCadInstall,
     return out
 
 
-# ================================================================ BOM check
-@dataclass
-class BomLine:
-    refs: str
-    qty: int
-    value: str
-    footprint: str
-    mpn: str = ""
-    manufacturer: str = ""
-    lcsc: str = ""
-    dnp: bool = False
-    offers: dict = field(default_factory=dict)  # source -> PartResult | str (error)
-
-
-def read_bom(project: Path, ki: KiCadInstall, settings: Settings) -> list[BomLine]:
-    sch = project.with_suffix(".kicad_sch")
-    if not ki.kicad_cli:
-        raise RuntimeError("kicad-cli not found")
-    names = fields.field_names(settings.field_names)
-    wanted = {k: list(dict.fromkeys([names[k]] + fields.ALIASES[k])) for k in ("mpn", "manufacturer", "lcsc")}
-    extra = [n for k in wanted for n in wanted[k]]
-    field_list = ["Reference", "Value", "Footprint", "${QUANTITY}", "${DNP}"] + extra
-    with tempfile.TemporaryDirectory() as td:
-        out = Path(td) / "bom.csv"
-        cmd = [str(ki.kicad_cli), "sch", "export", "bom", str(sch), "-o", str(out),
-               "--fields", ",".join(field_list), "--labels", ",".join(field_list),
-               "--group-by", ",".join(["Value", "Footprint"] + wanted["mpn"]), "--ref-range-delimiter", ""]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW)
-        if r.returncode != 0 or not out.exists():
-            raise RuntimeError(f"kicad-cli BOM export failed: {r.stderr or r.stdout}")
-        rows = list(csv.DictReader(out.read_text(encoding="utf-8-sig").splitlines()))
-
-    def first(row, key):
-        for n in wanted[key]:
-            v = (row.get(n) or "").strip()
-            if v and v != "~":
-                return v
-        return ""
-    lines = []
-    for row in rows:
-        lines.append(BomLine(
-            refs=row.get("Reference", ""), qty=int(row.get("${QUANTITY}") or 0 or 0),
-            value=row.get("Value", ""), footprint=row.get("Footprint", ""),
-            mpn=first(row, "mpn"), manufacturer=first(row, "manufacturer"), lcsc=first(row, "lcsc"),
-            dnp=(row.get("${DNP}") or "").strip().upper() in ("DNP", "YES", "TRUE", "1"),
-        ))
-    return lines
-
-
-def write_bom_report(lines: list[BomLine], sources: list[str], boards: int, path: Path) -> None:
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        head = ["References", "Qty/board", f"Qty x{boards}", "Value", "Footprint", "MPN", "Manufacturer"]
-        for s in sources:
-            head += [f"{s} PN", f"{s} stock", f"{s} lead", f"{s} price"]
-        w.writerow(head)
-        for ln in lines:
-            row = [ln.refs, ln.qty, ln.qty * boards, ln.value, ln.footprint, ln.mpn, ln.manufacturer]
-            for s in sources:
-                o = ln.offers.get(s)
-                if o is not None and not isinstance(o, str):
-                    row += [o.supplier_pn, o.stock if o.stock is not None else "", o.lead_str, o.price_str]
-                else:
-                    row += [o or "", "", "", ""]
-            w.writerow(row)
-
-
 # ================================================================ KiCad setup check
 def check_setup(ki: KiCadInstall, project_dir: Path | None, log: Log = _nolog) -> list[Issue]:
     from .kicad_env import ipc_api_enabled, read_json
     issues: list[Issue] = []
     vars_ = read_json(ki.config_dir / "kicad_common.json").get("environment", {}).get("vars") or {}
-    share = ki.root / "share" / "kicad" if ki.root else None
+    share = ki.share_dir
     checks = {"3DMODEL_DIR": ("3dmodels", "*.3dshapes", "3D models"),
               "SYMBOL_DIR": ("symbols", "*.kicad_sym", "symbol libraries"),
               "FOOTPRINT_DIR": ("footprints", "*.pretty", "footprint libraries")}
@@ -924,7 +855,7 @@ def apply_setup_fixes(ki: KiCadInstall, issues: list[Issue], log: Log = _nolog) 
         return "Close KiCad first - it rewrites its settings files on exit and would undo these fixes."
     cfg = ki.config_dir / "kicad_common.json"
     backup_files([cfg, ki.config_dir / "sym-lib-table", ki.config_dir / "fp-lib-table"],
-                 ki.config_dir / "part-importer-backup")
+                 ki.config_dir / "kiporter-backup")
     for i in chosen:
         act = i.action
         if act[0] == "reset_var":
@@ -938,7 +869,7 @@ def apply_setup_fixes(ki: KiCadInstall, issues: list[Issue], log: Log = _nolog) 
         elif act[0] == "enable_ipc":
             enable_ipc_api(ki)
             log("Enabled KiCad IPC API")
-    return f"Applied {len(chosen)} fixes. A backup of KiCad's settings is in {ki.config_dir / 'part-importer-backup'}."
+    return f"Applied {len(chosen)} fixes. A backup of KiCad's settings is in {ki.config_dir / 'kiporter-backup'}."
 
 
 # ================================================================ backup

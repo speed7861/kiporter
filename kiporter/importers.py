@@ -19,7 +19,7 @@ def _tmpdir(prefix: str) -> Path:
 
 
 # ---------------------------------------------------------------- EasyEDA / LCSC
-def stage_lcsc(lcsc_id: str, data: dict[str, str] | None = None) -> StagedPart:
+def stage_lcsc(lcsc_id: str, data: dict[str, str] | None = None, cad: dict | None = None) -> StagedPart:
     try:
         from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
         from easyeda2kicad.easyeda.easyeda_importer import (
@@ -28,11 +28,11 @@ def stage_lcsc(lcsc_id: str, data: dict[str, str] | None = None) -> StagedPart:
         from easyeda2kicad.kicad.export_kicad_footprint import ExporterFootprintKicad
         from easyeda2kicad.kicad.export_kicad_symbol import ExporterSymbolKicad
     except ImportError as e:
-        raise ImportError_("easyeda2kicad is not installed - run Install.bat again") from e
+        raise ImportError_("easyeda2kicad is not installed - run the installer again") from e
 
     lcsc_id = lcsc_id.strip().upper()
     api = EasyedaApi()
-    cad = api.get_cad_data_of_component(lcsc_id=lcsc_id)
+    cad = cad or api.get_cad_data_of_component(lcsc_id=lcsc_id)
     if not cad:
         raise ImportError_(f"EasyEDA has no CAD data for {lcsc_id}")
 
@@ -77,11 +77,10 @@ def _header(p: Path, n: int = 200) -> str:
 
 
 def _run_cli(ki: KiCadInstall, args: list[str]) -> bool:
-    cli = ki.kicad_cli
-    if not cli:
+    if not ki.cli:
         return False
     try:
-        r = subprocess.run([str(cli), *args], capture_output=True, text=True,
+        r = subprocess.run(ki.cli_cmd(*args), capture_output=True, text=True,
                            timeout=120, creationflags=NO_WINDOW)
         return r.returncode == 0
     except (OSError, subprocess.SubprocessError):
