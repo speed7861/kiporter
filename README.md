@@ -10,6 +10,8 @@ PCB editor) and finds your open project automatically.
 
 Inspired by [Import-LIB-KiCad-Plugin](https://github.com/Steffen-W/Import-LIB-KiCad-Plugin).
 
+If Kiporter saves you time, you can support it on [Ko-fi](https://ko-fi.com/speed7861).
+
 ![Search results with stock and lead times, and a footprint preview](docs/screenshots/search-footprint.png)
 
 ## Screenshots
@@ -239,6 +241,10 @@ directions are in **Settings → Suppliers** inside the app (paste the key and p
   Kiporter's export dialog and the shop's own page before ordering.
 - On macOS, the Update-PCB keyboard fallback needs Accessibility permission. On Linux/X11 it
   needs `xdotool`.
+
+## Support
+Kiporter is free. If you find it useful and want to say thanks, you can donate at
+**[ko-fi.com/speed7861](https://ko-fi.com/speed7861)**.
 
 ## License
 Kiporter is free software under the [GNU General Public License v3.0](LICENSE).
