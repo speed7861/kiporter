@@ -294,9 +294,14 @@ def test_bom_switch_to_lcsc_suggestion():
     assert ic.lcsc == "C5423" and ic.mpn == "LM358DR" and ic.offers["LCSC"].stock == 900 and ic.offers["Mouser"] is None
     assert alt.switch_back(ic) and ic.lcsc == "" and "LCSC" not in ic.offers and not alt.switch_back(ic)
 
-    b = alt.suggest(ic, res, 5000)  # the same part is short: fall back to the family member with enough stock
-    assert not b.exact and b.part.supplier_pn == "C7950"
-    alt.switch(ic, b)
+    b = alt.suggest(ic, res, 5000)  # LCSC lists the part, so it is suggested even though it is short
+    assert b.exact and b.part.supplier_pn == "C5423"
+    ic.data["lcsc"] = "C5423"
+    assert alt.suggest(ic, res, 5000) is None  # already an LCSC part: nothing to recommend
+    ic.data["lcsc"] = ""
+    fam = alt.suggest(ic, res[1:], 10)  # LCSC does not list it: the family member is offered
+    assert not fam.exact and fam.part.supplier_pn == "C7950"
+    alt.switch(ic, fam)
     assert ic.mpn == "LM358DR2G" and ic.lcsc == "C7950" and ic.offers["Mouser"] == "re-check"
 
     r = BomLine(refs=["R1"], qty=1, value="10k", footprint="Resistor_SMD:R_0603_1608Metric")

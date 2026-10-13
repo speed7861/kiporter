@@ -844,7 +844,7 @@ class BomTab(ttk.Frame):
                         ln.offers[name] = "error"
                     self.app.tlog(f"BOM check {name} {q}: {e}")
                 need = needs[id(ln)]
-                if name == "LCSC" and (not ln.lcsc or not best or (best.stock or 0) < need):
+                if name == "LCSC" and not ln.lcsc:  # a line that already has an LCSC part needs no suggestion
                     try:
                         ln.alts["LCSC"] = alternatives.suggest(ln, res, need, lcsc_search)
                     except Exception as e:  # noqa: BLE001

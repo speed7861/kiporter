@@ -1,4 +1,7 @@
-"""Suggest an LCSC part for BOM lines that have no LCSC number, or whose LCSC part is short.
+"""Suggest an LCSC part for BOM lines that have no LCSC number.
+
+A part that is already at LCSC - the line has an LCSC number, or LCSC lists the same manufacturer part
+number - never gets a different part suggested, whatever its stock.
 
 Suggestions come from LCSC only, so the LCSC column of the BOM (what JLCPCB assembles from) can be filled in.
 Three ways of being "close", best first:
@@ -192,19 +195,23 @@ def passive_pick(ln, results: list[PartResult], need: int) -> Alternative | None
 
 
 def same_part_pick(ln, results: list[PartResult], need: int) -> Alternative | None:
-    """LCSC's listing of the very same manufacturer part number."""
+    """LCSC's listing of the very same manufacturer part number (even when it is out of stock)."""
     target = _norm_mpn(ln.mpn)
-    if not target:
+    same = [Alternative(r, "same part at LCSC", SAME_PART) for r in results if target and _norm_mpn(r.mpn) == target]
+    if not same:
         return None
-    return _rank([Alternative(r, "same part at LCSC", SAME_PART) for r in results if _norm_mpn(r.mpn) == target], need)
+    return max(same, key=lambda a: ((a.part.stock or 0) >= need, a.part.stock or 0))
 
 
 def suggest(ln, results: list[PartResult], need: int, search=None) -> Alternative | None:
-    """Best LCSC suggestion for a line. results: LCSC's answer for the line's part number;
-    search(keyword) -> results is used for a same-value lookup when that is not enough."""
-    found = None if ln.lcsc else same_part_pick(ln, results, need)
-    if found is None or (found.part.stock or 0) < need:
-        found = _rank([a for a in (found, family_pick(ln, results, need) if ln.mpn else None) if a], need)
+    """LCSC suggestion for a line without an LCSC number. results: LCSC's answer for the line's part number;
+    search(keyword) -> results is used for a same-value lookup when LCSC does not list the part."""
+    if ln.lcsc:
+        return None  # already an LCSC part
+    found = same_part_pick(ln, results, need)
+    if found is not None:
+        return found  # LCSC lists this very part: nothing else to recommend
+    found = family_pick(ln, results, need) if ln.mpn else None
     if (found is None or (found.part.stock or 0) < need) and search is not None:
         kw = keyword(ln)
         if kw:
@@ -235,5 +242,5 @@ def switch_back(ln) -> bool:
 
 
 def best(ln, need: int) -> Alternative | None:
-    """The best suggestion across suppliers for a line (from ln.alts)."""
-    return _rank([a for a in ln.alts.values() if a is not None], need)
+    """The suggestion for a line (from ln.alts), if it has one."""
+    return next((a for a in ln.alts.values() if a is not None), None)

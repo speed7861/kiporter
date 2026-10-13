@@ -202,7 +202,7 @@ Click **Save** when you're done.
   and DNP status.
 - **Stock & lead-time check** at every connected supplier, for the number of boards you plan
   to build.
-- **Suggested LCSC parts:** for lines with no LCSC number, or whose LCSC part is short, Kiporter
+- **Suggested LCSC parts:** for lines with no LCSC number, Kiporter
   suggests an LCSC part: the very same manufacturer part number if LCSC stocks it, otherwise the
   same part family, or the same value and package for resistors, capacitors and inductors.
   **Use suggested LCSC part** switches the selected BOM lines to it, so the LCSC column is
