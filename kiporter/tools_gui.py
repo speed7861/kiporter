@@ -659,6 +659,8 @@ class BomTab(ttk.Frame):
         ttk.Button(bar, text="⬇ Export for board house / distributor…", command=self.export_dialog,
                    style="Accent.TButton").pack(side="left")
         ttk.Button(bar, text="Stock report…", command=self.export_stock).pack(side="left", padx=6)
+        self.switch_btn = ttk.Button(bar, text="Use suggested LCSC part", command=self.use_suggested)
+        self.switch_btn.pack(side="left")
         self.info = tk.StringVar(value="Load the BOM of the selected project (reads the saved schematic and PCB).")
         ttk.Label(self, textvariable=self.info, style="Muted.TLabel").pack(fill="x", pady=(6, 0))
         frame = ttk.Frame(self)
@@ -678,6 +680,14 @@ class BomTab(ttk.Frame):
         self.tree.tag_configure("nompn", foreground="#888888")
         self.tree.tag_configure("dnp", foreground="#aaaaaa")
         self.tree.bind("<Double-1>", self._search_line)
+        self.menu = tk.Menu(self, tearoff=False)
+        self.menu.add_command(label="Use suggested LCSC part", command=self.use_suggested)
+        self.menu.add_command(label="Use every suggestion that is the same part", command=self.use_same_parts)
+        self.menu.add_command(label="Switch back to the original part", command=self.switch_back)
+        self.menu.add_separator()
+        self.menu.add_command(label="Search for this part", command=self._search_line)
+        self.tree.bind("<Button-3>", self._popup)
+        self.tree.bind("<Button-2>", self._popup)  # macOS
         self._setup_columns()
 
     def settings_changed(self) -> None:
@@ -687,7 +697,7 @@ class BomTab(ttk.Frame):
     def _setup_columns(self) -> None:
         src_cols = [(f"s{i}", f"{s} (stock | lead)", 140) for i, s in enumerate(self.sources)]
         tail = [("best", "Best source", 140), ("status", "Status", 100),
-                ("alt", "Suggested alternative", 420)] if self.sources else []
+                ("alt", "Suggested LCSC part", 440)] if self.sources else []
         cols = self.BASE_COLS + src_cols + tail
         self.tree["columns"] = [c[0] for c in cols]
         for cid, head, w in cols:
@@ -766,8 +776,13 @@ class BomTab(ttk.Frame):
                 tail = [best, {"ok": "✔ in stock", "low": "⚠ short", "none": "✖ none",
                                "no MPN": "no MPN", "dnp": "DNP"}.get(status, "")]
                 tag = {"ok": "ok", "low": "low", "none": "none", "no MPN": "nompn", "dnp": "dnp"}.get(status, "")
-                alt = alternatives.best(ln, self._need(ln)) if status in ("low", "none", "no MPN") else None
-                tail.append(alt.text() if alt else "")
+                if ln.original is not None:
+                    old = ln.original[0]
+                    tail.append(f"✔ LCSC number added ({ln.lcsc})" if old.get("mpn") == ln.mpn and not old.get("lcsc")
+                                else "✔ switched from " + (old.get("mpn") or old.get("lcsc") or "no part number"))
+                else:
+                    alt = None if ln.dnp else alternatives.best(ln, self._need(ln))
+                    tail.append(alt.text() if alt else "")
             d = ln.data
             self.tree.insert("", "end", iid=str(self.lines.index(ln)), tags=(tag,) if tag else (), values=(
                 n, ln.refs_str, ln.qty, self._need(ln), ln.value + ("  (DNP)" if ln.dnp else ""), ln.footprint_name,
@@ -788,28 +803,26 @@ class BomTab(ttk.Frame):
         # lines without a part number are still worth a look when they are plain R/C/L with a value
         todo = [l for l in self.lines if not l.dnp and (l.mpn or l.lcsc or alternatives.keyword(l))]
         for ln in todo:
+            alternatives.switch_back(ln)
             ln.offers = {s: None for s in self.sources} if (ln.mpn or ln.lcsc) else {}
             ln.alts = {}
         self.checking = True
         self._redraw()
         self.info.set(f"Checking {len(todo)} parts at {', '.join(self.sources)}…")
-        remaining = [len(self.sources)]
         needs = {id(ln): self._need(ln) for ln in todo}
-
-        def suggest(prov, ln, res, need, delay):
-            """Closest in-stock part at this supplier, for a line it cannot fill."""
-            alt = alternatives.family_pick(ln, res, need) if ln.mpn else None
-            if alt is None or (alt.part.stock or 0) < need:
-                kw = alternatives.keyword(ln)
-                if kw:
-                    time.sleep(delay)
-                    alt2 = alternatives.passive_pick(ln, prov.search(kw, limit=50), need)
-                    alt = alternatives._rank([a for a in (alt, alt2) if a], need)
-            return alt
+        # LCSC is always asked: it is where the suggestions for the LCSC column come from
+        passes = list(self.sources) + ([] if "LCSC" in self.sources else ["LCSC"])
+        remaining = [len(passes)]
 
         def worker(name: str):
             prov = self.app.providers[name]
             delay = 2.1 if name == "Mouser" else 0.6 if name == "Farnell/Newark" else 0.3
+            shown = name in self.sources
+
+            def lcsc_search(kw: str):
+                time.sleep(delay)
+                return prov.search(kw, limit=50)
+
             for ln in todo:
                 if gen != self._gen:
                     return
@@ -824,16 +837,18 @@ class BomTab(ttk.Frame):
                             best = next((r for r in res if r.supplier_pn == ln.lcsc), None)
                         else:
                             best = providers.best_match(res, q)
-                        ln.offers[name] = best or "not found"
+                        if shown:
+                            ln.offers[name] = best or "not found"
                 except Exception as e:  # noqa: BLE001
-                    ln.offers[name] = "error"
+                    if shown:
+                        ln.offers[name] = "error"
                     self.app.tlog(f"BOM check {name} {q}: {e}")
                 need = needs[id(ln)]
-                if not best or (best.stock or 0) < need:
+                if name == "LCSC" and (not ln.lcsc or not best or (best.stock or 0) < need):
                     try:
-                        ln.alts[name] = suggest(prov, ln, res, need, delay)
+                        ln.alts["LCSC"] = alternatives.suggest(ln, res, need, lcsc_search)
                     except Exception as e:  # noqa: BLE001
-                        self.app.tlog(f"BOM alternative {name} {ln.refs_str}: {e}")
+                        self.app.tlog(f"BOM suggestion {ln.refs_str}: {e}")
                 self.app.post(self._redraw)
                 time.sleep(delay)
             self.app.post(finish)
@@ -844,14 +859,55 @@ class BomTab(ttk.Frame):
                 self.checking = False
                 self._redraw()
                 states = [self._best(l)[1] for l in self.lines if not l.dnp]
-                found = sum(1 for l in self.lines if not l.dnp and self._best(l)[1] != "ok"
-                            and alternatives.best(l, self._need(l)))
+                alts = [a for a in (alternatives.best(l, self._need(l)) for l in self.lines if not l.dnp) if a]
+                same = sum(1 for a in alts if a.exact)
                 self.info.set(f"Done: {states.count('ok')} in stock, {states.count('low')} short, "
                               f"{states.count('none')} unavailable, {states.count('no MPN')} without MPN. "
-                              f"{found} alternatives suggested - check them before ordering.")
+                              f"{len(alts)} LCSC parts suggested ({same} the same part, {len(alts) - same} similar "
+                              "- check those). Select lines and press 'Use suggested LCSC part'.")
                 self.app.settings.save()
-        for name in self.sources:
+        for name in passes:
             threading.Thread(target=worker, args=(name,), daemon=True).start()
+
+    # ---------------------------------------------------------------- suggested LCSC parts
+    def _popup(self, e) -> None:
+        iid = self.tree.identify_row(e.y)
+        if iid and iid not in self.tree.selection():
+            self.tree.selection_set(iid)
+        self.menu.tk_popup(e.x_root, e.y_root)
+
+    def _switch(self, lines: list, only_exact: bool = False) -> None:
+        done = 0
+        for ln in lines:
+            alt = alternatives.best(ln, self._need(ln)) if ln.original is None and not ln.dnp else None
+            if alt and (alt.exact or not only_exact):
+                alternatives.switch(ln, alt)
+                done += 1
+        self._redraw()
+        self.info.set(f"Switched {done} line(s) to the suggested LCSC part. This changes the BOM shown and exported "
+                      "here, not your schematic. Right-click a line to switch back." if done else
+                      "No suggestion to use on the selected line(s) - run 'Check stock & lead times' first.")
+
+    def use_suggested(self) -> None:
+        sel = [self.lines[int(i)] for i in self.tree.selection()]
+        if not sel:
+            messagebox.showinfo(APP_TITLE, "Select one or more BOM lines that have a suggested LCSC part.")
+            return
+        similar = [l for l in sel if l.original is None and (a := alternatives.best(l, self._need(l))) and not a.exact]
+        if similar and not messagebox.askyesno(
+                APP_TITLE, f"{len(similar)} of the selected suggestions are a similar part, not the same one "
+                           "(same family, or same value and package).\n\nTolerance, voltage rating and suffix are "
+                           "not checked. Switch them anyway?"):
+            return
+        self._switch(sel)
+
+    def use_same_parts(self) -> None:
+        self._switch(list(self.lines), only_exact=True)
+
+    def switch_back(self) -> None:
+        done = sum(alternatives.switch_back(self.lines[int(i)]) for i in self.tree.selection())
+        self._redraw()
+        self.info.set(f"Switched {done} line(s) back to the original part.")
 
     def animate(self, frame: str) -> None:
         """Spin the cells that are still waiting for a supplier's answer."""

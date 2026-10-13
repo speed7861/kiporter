@@ -278,3 +278,28 @@ def test_bom_alternatives():
            PartResult(source="Mouser", mpn="LM324DR", package="SOIC-14", stock=9000)]
     assert alt.family_pick(ic, fam, 5).part.mpn == "LM358DR2G"
     assert alt.keyword(ic) is None
+
+
+def test_bom_switch_to_lcsc_suggestion():
+    from kiporter import alternatives as alt
+    from kiporter.bom import BomLine
+    from kiporter.providers import PartResult
+    ic = BomLine(refs=["U1"], qty=1, value="LM358", footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+                 data={"mpn": "LM358DR", "manufacturer": "TI"}, offers={"Mouser": None})
+    res = [PartResult(source="LCSC", mpn="LM358DR", supplier_pn="C5423", package="SOIC-8", stock=900),
+           PartResult(source="LCSC", mpn="LM358DR2G", supplier_pn="C7950", package="SOIC-8", stock=99999)]
+    a = alt.suggest(ic, res, 10)
+    assert a.exact and a.part.supplier_pn == "C5423"
+    alt.switch(ic, a)
+    assert ic.lcsc == "C5423" and ic.mpn == "LM358DR" and ic.offers["LCSC"].stock == 900 and ic.offers["Mouser"] is None
+    assert alt.switch_back(ic) and ic.lcsc == "" and "LCSC" not in ic.offers and not alt.switch_back(ic)
+
+    b = alt.suggest(ic, res, 5000)  # the same part is short: fall back to the family member with enough stock
+    assert not b.exact and b.part.supplier_pn == "C7950"
+    alt.switch(ic, b)
+    assert ic.mpn == "LM358DR2G" and ic.lcsc == "C7950" and ic.offers["Mouser"] == "re-check"
+
+    r = BomLine(refs=["R1"], qty=1, value="10k", footprint="Resistor_SMD:R_0603_1608Metric")
+    hits = [PartResult(source="LCSC", mpn="RC0603", supplier_pn="C25804", description="10kΩ ±1%", package="0603", stock=5000)]
+    c = alt.suggest(r, [], 1, lambda kw: hits if kw == "10k 0603 resistor" else [])
+    assert c.part.supplier_pn == "C25804" and not c.exact

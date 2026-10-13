@@ -688,7 +688,8 @@ class App(tk.Tk):
         self._search_gen += 1
         gen = self._search_gen
         self._cad_queued.clear()
-        self.tree.delete(*self.tree.get_children())
+        # rows hidden by a filter are detached, not listed as children: delete those too
+        self.tree.delete(*[i for i in set(self.tree.get_children()) | set(self.results) if self.tree.exists(i)])
         self.results.clear()
         self.preview.clear()
         self._pending_jobs = len(names)

@@ -1,6 +1,8 @@
-"""Suggest the closest in-stock part for BOM lines that are short, unavailable or have no part number.
+"""Suggest an LCSC part for BOM lines that have no LCSC number, or whose LCSC part is short.
 
-Two ways of being "close":
+Suggestions come from LCSC only, so the LCSC column of the BOM (what JLCPCB assembles from) can be filled in.
+Three ways of being "close", best first:
+  * same part - LCSC stocks the very same manufacturer part number;
   * same family - the part number starts the same way (LM358DR -> LM358DR2G) and the package agrees;
   * same value and package - for plain resistors, capacitors and inductors (10k 0603 -> any 10k 0603).
 Suggestions are a starting point: tolerance, voltage rating and suffix differences are not checked.
@@ -13,6 +15,7 @@ from dataclasses import dataclass
 from .providers import PartResult, _norm_mpn, guess_package
 
 KINDS = {"R": "resistor", "C": "capacitor", "L": "inductor"}
+SAME_PART = 10.0  # score of a suggestion that is the very same manufacturer part number
 _MULT = {"": 1.0, "r": 1.0, "p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "μ": 1e-6, "m": 1e-3,
          "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
 _NUM = r"(\d+(?:\.\d+)?)"
@@ -38,7 +41,11 @@ class Alternative:
     def text(self) -> str:
         p = self.part
         bits = [b for b in (p.stock_str and f"{p.stock_str} in stock", p.price_str) if b]
-        return f"{p.source}: {p.mpn}" + (f" ({', '.join(bits)})" if bits else "") + f" - {self.reason}"
+        return f"{p.supplier_pn}  {p.mpn}" + (f" ({', '.join(bits)})" if bits else "") + f" - {self.reason}"
+
+    @property
+    def exact(self) -> bool:
+        return self.score >= SAME_PART
 
 
 def kind_of(refs: list[str]) -> str | None:
@@ -182,6 +189,49 @@ def passive_pick(ln, results: list[PartResult], need: int) -> Alternative | None
             continue
         out.append(Alternative(r, f"same value and package ({format_value(v, kind)} {want}), check tolerance and rating"))
     return _rank(out, need)
+
+
+def same_part_pick(ln, results: list[PartResult], need: int) -> Alternative | None:
+    """LCSC's listing of the very same manufacturer part number."""
+    target = _norm_mpn(ln.mpn)
+    if not target:
+        return None
+    return _rank([Alternative(r, "same part at LCSC", SAME_PART) for r in results if _norm_mpn(r.mpn) == target], need)
+
+
+def suggest(ln, results: list[PartResult], need: int, search=None) -> Alternative | None:
+    """Best LCSC suggestion for a line. results: LCSC's answer for the line's part number;
+    search(keyword) -> results is used for a same-value lookup when that is not enough."""
+    found = None if ln.lcsc else same_part_pick(ln, results, need)
+    if found is None or (found.part.stock or 0) < need:
+        found = _rank([a for a in (found, family_pick(ln, results, need) if ln.mpn else None) if a], need)
+    if (found is None or (found.part.stock or 0) < need) and search is not None:
+        kw = keyword(ln)
+        if kw:
+            found = _rank([a for a in (found, passive_pick(ln, search(kw), need)) if a], need)
+    return found
+
+
+def switch(ln, alt: Alternative) -> None:
+    """Make the suggested LCSC part the line's part (kept in ln.original so it can be undone)."""
+    if ln.original is None:
+        ln.original = (dict(ln.data), dict(ln.offers))
+    p = alt.part
+    ln.data["lcsc"] = p.supplier_pn
+    if not alt.exact:  # a different part: its own number and maker go into the BOM
+        ln.data["mpn"] = p.mpn
+        if p.manufacturer:
+            ln.data["manufacturer"] = p.manufacturer
+        ln.offers = {s: ("re-check" if s != "LCSC" else o) for s, o in ln.offers.items()}
+    ln.offers["LCSC"] = p
+
+
+def switch_back(ln) -> bool:
+    if ln.original is None:
+        return False
+    ln.data, ln.offers = ln.original
+    ln.original = None
+    return True
 
 
 def best(ln, need: int) -> Alternative | None:

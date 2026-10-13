@@ -202,10 +202,12 @@ Click **Save** when you're done.
   and DNP status.
 - **Stock & lead-time check** at every connected supplier, for the number of boards you plan
   to build.
-- **Suggested alternatives:** for lines that are short, out of stock or have no part number,
-  Kiporter suggests the closest in-stock part: the same part family, or the same value and
-  package for resistors, capacitors and inductors. Suggestions are also in the stock report.
-  Check tolerance, rating and suffix before ordering.
+- **Suggested LCSC parts:** for lines with no LCSC number, or whose LCSC part is short, Kiporter
+  suggests an LCSC part: the very same manufacturer part number if LCSC stocks it, otherwise the
+  same part family, or the same value and package for resistors, capacitors and inductors.
+  **Use suggested LCSC part** switches the selected BOM lines to it, so the LCSC column is
+  filled in for JLCPCB exports (right-click to switch back). Similar parts are not checked for
+  tolerance, rating or suffix - check those yourself.
 - **Export for board houses:** JLCPCB, PCBWay, ALLPCB, Seeed Fusion, NextPCB, Eurocircuits,
   Aisler, MacroFab, with pick-and-place/CPL files.
 - **Export for distributor BOM tools:** Digi-Key, Mouser and LCSC.

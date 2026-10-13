@@ -31,7 +31,8 @@ class BomLine:
     data: dict = field(default_factory=dict)  # canonical field data (mpn, manufacturer, lcsc, digikey, ...)
     mount: str = ""  # SMD | THT | Mixed
     offers: dict = field(default_factory=dict)  # supplier -> PartResult | str
-    alts: dict = field(default_factory=dict)  # supplier -> alternatives.Alternative | None
+    alts: dict = field(default_factory=dict)  # "LCSC" -> alternatives.Alternative | None
+    original: tuple | None = None  # (data, offers) from before switching to a suggested part
 
     @property
     def mpn(self) -> str:
@@ -375,31 +376,34 @@ def stock_status(ln: BomLine, need: int) -> str:
 
 def write_stock_report(lines: list[BomLine], sources: list[str], boards: int, path: Path) -> Path:
     from . import alternatives
-    head = ["References", "Qty/board", f"Qty x{boards}", "Value", "Footprint", "MPN", "Manufacturer", "Status"]
+    head = ["References", "Qty/board", f"Qty x{boards}", "Value", "Footprint", "MPN", "Manufacturer", "Status",
+            "LCSC #"]
     for s in sources:
         head += [f"{s} PN", f"{s} stock", f"{s} lead", f"{s} price"]
-    head += ["Suggested alternative", "Alt. supplier", "Alt. supplier PN", "Alt. manufacturer", "Alt. stock",
-             "Alt. price", "Why it was suggested"]
+    head += ["Suggested LCSC part", "Suggested LCSC #", "Suggested manufacturer", "Suggested stock",
+             "Suggested price", "Why it was suggested", "Switched from"]
     labels = {"ok": "in stock", "low": "short", "none": "unavailable", "no MPN": "no MPN"}
     rows = [head]
     for ln in lines:
         need = ln.qty * boards
         status = stock_status(ln, need)
         row = [ln.refs_str, ln.qty, need, ln.value, ln.footprint_name, ln.mpn, ln.manufacturer,
-               labels.get(status, "")]
+               labels.get(status, ""), ln.lcsc]
         for s in sources:
             o = ln.offers.get(s)
             if o is not None and not isinstance(o, str):
                 row += [o.supplier_pn, o.stock if o.stock is not None else "", o.lead_str, o.price_str]
             else:
                 row += [o or "", "", "", ""]
-        alt = alternatives.best(ln, need) if status != "ok" else None
+        alt = alternatives.best(ln, need) if ln.original is None else None
         if alt:
             p = alt.part
-            row += [p.mpn, p.source, p.supplier_pn, p.manufacturer, p.stock if p.stock is not None else "",
-                    p.price_str, alt.reason]
+            row += [p.mpn, p.supplier_pn, p.manufacturer, p.stock if p.stock is not None else "",
+                    p.price_str, alt.reason, ""]
         else:
-            row += [""] * 7
+            old = ln.original[0] if ln.original else {}
+            row += [""] * 6 + [" ".join(x for x in (old.get("mpn", ""), old.get("lcsc", "")) if x) or
+                               ("(no part number)" if ln.original else "")]
         rows.append(row)
     return write_table(rows, path, "Stock")
 
