@@ -107,6 +107,9 @@ If no preset fits, make a **custom Gerber setup**. You choose the layers, Gerber
 
 You need **KiCad 8 or newer** (KiCad 9+ is required for 3D previews) and an internet connection.
 
+Download the latest version from the
+[Releases page](https://github.com/speed7861/kiporter/releases/latest) (Source code ZIP) and unzip it.
+
 | OS | How |
 |---|---|
 | **Windows** | Download or clone this repo and double-click **`Install.bat`**. It installs Python if needed, creates the Desktop and Start Menu shortcuts, and starts Kiporter. |
