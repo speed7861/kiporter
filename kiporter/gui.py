@@ -57,6 +57,9 @@ class App(tk.Tk):
         self.project_libs: list[library.LibraryTarget] = []
         self.global_libs: list[library.LibraryTarget] = []
         self._ui_q: queue.Queue = queue.Queue()
+        self._busy = 0  # background jobs in flight
+        self._spin_iid: str | None = None
+        self._pending_sources: set = set()
         self._search_gen = 0
         self._search_cache: dict[tuple, tuple] = {}
         self._cad_queued: set[str] = set()
@@ -79,23 +82,29 @@ class App(tk.Tk):
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(50, self._pump_ui_queue)
+        self.after(300, self._spin)
         self.after(200, self._startup)
 
     # ================================================================ plumbing
-    def run_bg(self, fn, on_done=None, on_error=None) -> None:
-        """Run fn() in a worker thread; deliver result/exception on the Tk thread."""
+    def run_bg(self, fn, on_done=None, on_error=None, quiet: bool = False) -> None:
+        """Run fn() in a worker thread; deliver result/exception on the Tk thread.
+        quiet: do not show the busy spinner (for routine background polling)."""
         def worker():
             try:
                 res = fn()
-                self._ui_q.put((on_done, res, None))
+                self._ui_q.put((on_done, res, None, not quiet))
             except Exception as e:  # noqa: BLE001
-                self._ui_q.put((on_error, e, traceback.format_exc()))
+                self._ui_q.put((on_error, e, traceback.format_exc(), not quiet))
+        if not quiet:
+            self._busy += 1
         threading.Thread(target=worker, daemon=True).start()
 
     def _pump_ui_queue(self) -> None:
         try:
             for _ in range(200):
-                cb, payload, tb = self._ui_q.get_nowait()
+                cb, payload, tb, counted = self._ui_q.get_nowait()
+                if counted:
+                    self._busy = max(0, self._busy - 1)
                 if tb is not None:
                     self.log(tb, quiet=True)
                     if cb:
@@ -108,9 +117,35 @@ class App(tk.Tk):
             pass
         self.after(40, self._pump_ui_queue)
 
+    def _spin(self) -> None:
+        """Animate the little circle wherever something is still loading."""
+        frame = ui.spinner_frame()
+        try:
+            busy = self._busy > 0 or bool(self._cad_queued) or self.bom_tab.checking
+            self.busy_var.set(frame if busy else "")
+            for iid in self._cad_queued:  # CAD column of rows still being checked
+                if self.tree.exists(iid):
+                    self.tree.set(iid, "cad", frame)
+            sel = self.tree.selection()
+            iid = sel[0] if sel else None
+            r = self.results.get(iid) if iid else None
+            if r is not None and r.cad is None and self._pending_sources:
+                self.tree.set(iid, "cad", frame)
+                self._spin_iid = iid
+            elif self._spin_iid:
+                old = self._spin_iid
+                self._spin_iid = None
+                if old in self.results and self.tree.exists(old) and old not in self._cad_queued:
+                    self.tree.set(old, "cad", cad.label(self.results[old]))
+            self.preview.animate(frame)
+            self.bom_tab.animate(frame)
+        except tk.TclError:
+            pass
+        self.after(160, self._spin)
+
     def post(self, fn, *args) -> None:
         """Call fn(*args) on the Tk thread (safe from worker threads)."""
-        self._ui_q.put((lambda _: fn(*args), None, None))
+        self._ui_q.put((lambda _: fn(*args), None, None, False))
 
     def log(self, msg: str, quiet: bool = False) -> None:
         try:
@@ -168,7 +203,11 @@ class App(tk.Tk):
 
         # ---- log + status bar (packed before the notebook so they keep their height)
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(self, textvariable=self.status_var, anchor="w", relief="sunken").pack(fill="x", side="bottom")
+        bar = ttk.Frame(self, relief="sunken")
+        bar.pack(fill="x", side="bottom")
+        self.busy_var = tk.StringVar()
+        ttk.Label(bar, textvariable=self.busy_var, width=3, anchor="center").pack(side="left")
+        ttk.Label(bar, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
         lf = ttk.LabelFrame(self, text="Log")
         lf.pack(fill="x", side="bottom", padx=8, pady=(2, 2))
         self.log_text = tk.Text(lf, height=6, wrap="word", font=ui.FONTS.get("mono"), state="disabled")
@@ -406,10 +445,10 @@ class App(tk.Tk):
             status["ipc_version"] = kicad_control.ipc_version() if status.get("running") else ""
             return projects, status
 
-        self.run_bg(work, self._projects_loaded)
+        self.run_bg(work, self._projects_loaded, quiet=True)
 
     def _auto_refresh(self) -> None:
-        self.run_bg(lambda: kicad_env.detect_projects(self.ki), self._projects_loaded)
+        self.run_bg(lambda: kicad_env.detect_projects(self.ki), self._projects_loaded, quiet=True)
         self.after(max(5, self.settings.auto_refresh_s) * 1000, self._auto_refresh)
 
     def _projects_loaded(self, res) -> None:
@@ -1124,15 +1163,22 @@ class App(tk.Tk):
             self.log(f"  + 3D model   {m}")
         for s in res.skipped:
             self.log(f"  = skipped    {s}  (tick 'Overwrite existing' to replace)")
+        if res.symbols or res.footprints or res.models:
+            self.log(f"✔ Successfully imported {label} into {target.name}.")
+        else:
+            self.log(f"Nothing new imported for {label} - it is already in {target.name}.")
         if res.symbols:
             sym = res.symbols[0]
             self.clipboard_clear()
             self.clipboard_append(sym.split(":", 1)[1])
-            self.set_status(f"Imported {sym} — name copied to clipboard. In the Schematic Editor press A and paste.")
+            self.set_status(f"✔ Successfully imported {sym} — name copied to clipboard. "
+                            "In the Schematic Editor press A and paste.")
         elif res.footprints:
-            self.set_status(f"Imported footprint {res.footprints[0]}")
+            self.set_status(f"✔ Successfully imported footprint {res.footprints[0]}")
+        elif res.models:
+            self.set_status(f"✔ Successfully imported the 3D model of {label}")
         else:
-            self.set_status(f"Nothing new imported for {label}")
+            self.set_status(f"Nothing new imported for {label} - it is already in {target.name}")
         if new_lib:
             self.refresh_libraries()
             if kicad_env.running_kicad_processes():

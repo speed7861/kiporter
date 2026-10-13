@@ -38,6 +38,7 @@ class PreviewPane(ttk.Notebook):
         self._sym_drawing: render.Drawing | None = None
         self._fp_drawing: render.Drawing | None = None
         self._sym_msg = self._fp_msg = ""
+        self._photo_msg = self._model_msg = ""
         self.sym_canvas.bind("<Configure>", lambda e: self._redraw("sym"))
         self.fp_canvas.bind("<Configure>", lambda e: self._redraw("fp"))
 
@@ -122,7 +123,8 @@ class PreviewPane(ttk.Notebook):
     def set_photo(self, data: bytes | None, msg: str = "") -> None:
         img = ui.load_image_bytes(data, 360, 300) if data else None
         self._photo = img
-        self.photo_label.configure(image=img or "", text="" if img else (msg or "No photo available"))
+        self._photo_msg = "" if img else (msg or "No photo available")
+        self.photo_label.configure(image=img or "", text=self._photo_msg)
 
     def set_symbol(self, lib: list | None, name: str | None, msg: str = "") -> None:
         self._sym_drawing = render.symbol_drawing(lib, name) if lib is not None and name else None
@@ -137,7 +139,18 @@ class PreviewPane(ttk.Notebook):
     def set_3d(self, png: Path | None, msg: str = "") -> None:
         img = ui.load_image_file(png, 520, 400) if png and png.exists() else None
         self._model_img = img
-        self.model_label.configure(image=img or "", text="" if img else msg)
+        self._model_msg = "" if img else msg
+        self.model_label.configure(image=img or "", text=self._model_msg)
+
+    def animate(self, frame: str) -> None:
+        """Put the spinner in front of every message that says something is still loading (ends in …)."""
+        for canvas, drawing, msg in ((self.sym_canvas, self._sym_drawing, self._sym_msg),
+                                     (self.fp_canvas, self._fp_drawing, self._fp_msg)):
+            if drawing is None and msg.endswith("…"):
+                canvas.itemconfigure("msg", text=f"{frame}  {msg}")
+        for label, msg in ((self.photo_label, self._photo_msg), (self.model_label, self._model_msg)):
+            if msg.endswith("…"):
+                label.configure(text=f"{frame}  {msg}")
 
     def current_tab(self) -> str:
         try:
@@ -157,7 +170,7 @@ class PreviewPane(ttk.Notebook):
             msg = (self._sym_msg if which == "sym" else self._fp_msg) or "Nothing to show"
             canvas.create_text(max(canvas.winfo_width(), 100) / 2, max(canvas.winfo_height(), 60) / 2, text=msg,
                                fill="#777" if which == "sym" else "#aaa", width=max(canvas.winfo_width() - 30, 80),
-                               justify="center")
+                               justify="center", tags="msg")
 
     def _tab_changed(self, _e=None) -> None:
         if self.current_tab() == "3D" and self.on_3d_requested:

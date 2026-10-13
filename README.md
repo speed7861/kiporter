@@ -193,12 +193,19 @@ Click **Save** when you're done.
   local libraries, or a new one. Kiporter registers it in KiCad's library tables and links
   the 3D paths automatically.
 - **Update PCB from Schematic** button (uses the KiCad API, or presses the F8 shortcut as a fallback).
+  In Settings → KiCad you can choose which of the dialog's options Kiporter ticks for you
+  (replace footprints, delete footprints with no symbols, …) and whether it presses
+  **Update PCB** as well (Windows).
 
 ### BOM
 - **View the project BOM:** references, quantities, SMD/THT type, MPNs, supplier part numbers
   and DNP status.
 - **Stock & lead-time check** at every connected supplier, for the number of boards you plan
   to build.
+- **Suggested alternatives:** for lines that are short, out of stock or have no part number,
+  Kiporter suggests the closest in-stock part: the same part family, or the same value and
+  package for resistors, capacitors and inductors. Suggestions are also in the stock report.
+  Check tolerance, rating and suffix before ordering.
 - **Export for board houses:** JLCPCB, PCBWay, ALLPCB, Seeed Fusion, NextPCB, Eurocircuits,
   Aisler, MacroFab, with pick-and-place/CPL files.
 - **Export for distributor BOM tools:** Digi-Key, Mouser and LCSC.

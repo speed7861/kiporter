@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
@@ -21,6 +22,13 @@ def _keep(ph):
 
 
 APP_ID = "speed7861.Kiporter"
+
+
+SPINNER = "◐◓◑◒"  # shown wherever something is still loading
+
+
+def spinner_frame() -> str:
+    return SPINNER[int(time.time() * 6) % len(SPINNER)]
 
 
 def set_app_id() -> None:

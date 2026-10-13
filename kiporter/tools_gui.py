@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING, Callable
 
-from . import alternatives, bom, kicad_control, library, libtools, providers, render, sexpr
+from . import alternatives, bom, kicad_control, library, libtools, providers, render, sexpr, ui
 
 if TYPE_CHECKING:
     from .gui import App
@@ -643,6 +643,7 @@ class BomTab(ttk.Frame):
         self.lines: list[bom.BomLine] = []
         self.sources: list[str] = []
         self._gen = 0
+        self.checking = False  # a stock check is running
         bar = ttk.Frame(self)
         bar.pack(fill="x")
         ttk.Button(bar, text="↻ Load BOM from project", command=self.load).pack(side="left")
@@ -753,7 +754,7 @@ class BomTab(ttk.Frame):
             for s in self.sources:
                 o = ln.offers.get(s)
                 if o is None:
-                    cells.append("…" if s in ln.offers else "")
+                    cells.append(ui.spinner_frame() if s in ln.offers and self.checking else "")
                 elif isinstance(o, str):
                     cells.append(o)
                 else:
@@ -789,6 +790,7 @@ class BomTab(ttk.Frame):
         for ln in todo:
             ln.offers = {s: None for s in self.sources} if (ln.mpn or ln.lcsc) else {}
             ln.alts = {}
+        self.checking = True
         self._redraw()
         self.info.set(f"Checking {len(todo)} parts at {', '.join(self.sources)}…")
         remaining = [len(self.sources)]
@@ -839,6 +841,7 @@ class BomTab(ttk.Frame):
         def finish():
             remaining[0] -= 1
             if remaining[0] == 0 and gen == self._gen:
+                self.checking = False
                 self._redraw()
                 states = [self._best(l)[1] for l in self.lines if not l.dnp]
                 found = sum(1 for l in self.lines if not l.dnp and self._best(l)[1] != "ok"
@@ -849,6 +852,17 @@ class BomTab(ttk.Frame):
                 self.app.settings.save()
         for name in self.sources:
             threading.Thread(target=worker, args=(name,), daemon=True).start()
+
+    def animate(self, frame: str) -> None:
+        """Spin the cells that are still waiting for a supplier's answer."""
+        if not self.checking:
+            return
+        for i, ln in enumerate(self.lines):
+            if not ln.offers or not self.tree.exists(str(i)):
+                continue
+            for n, s in enumerate(self.sources):
+                if s in ln.offers and ln.offers[s] is None:
+                    self.tree.set(str(i), f"s{n}", frame)
 
     def export_stock(self) -> None:
         if not self.lines or not self.sources:
