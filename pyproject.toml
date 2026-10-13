@@ -8,6 +8,7 @@ dynamic = ["version"]
 description = "Search LCSC, Digi-Key, Mouser, Farnell/Newark, TME and Octopart and import parts into KiCad"
 readme = "README.md"
 requires-python = ">=3.9"
+license = {text = "GPL-3.0-or-later"}
 dependencies = [
     "requests>=2.28",
     "easyeda2kicad==1.0.1",

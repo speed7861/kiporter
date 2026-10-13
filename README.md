@@ -239,3 +239,6 @@ directions are in **Settings → Suppliers** inside the app (paste the key and p
   Kiporter's export dialog and the shop's own page before ordering.
 - On macOS, the Update-PCB keyboard fallback needs Accessibility permission. On Linux/X11 it
   needs `xdotool`.
+
+## License
+Kiporter is free software under the [GNU General Public License v3.0](LICENSE).
