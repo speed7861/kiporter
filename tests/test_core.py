@@ -363,3 +363,10 @@ def test_schematic_fields_are_written_in_place(tmp_path):
     assert '"LCSC Part" "C25804"' in root_text and '(symbol "Device:R"' in root_text
     assert root_text.count("C25804") == 1  # the library copy of the symbol is left alone
     assert schedit.set_fields(tmp_path / "root.kicad_sch", upd, names)[0] == 0
+
+
+def test_lcsc_number_search_keeps_the_exact_part():
+    from kiporter.providers import PartResult, _best_keyword_matches
+    hits = [PartResult(source="LCSC", mpn="1N4148WS", supplier_pn="C2128", description="Switching diode"),
+            PartResult(source="LCSC", mpn="XC2128-ABC", supplier_pn="C3826377", description="Something else")]
+    assert "C2128" in [r.supplier_pn for r in _best_keyword_matches("C2128", hits)]

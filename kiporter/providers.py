@@ -329,7 +329,7 @@ def _best_keyword_matches(keyword: str, results: list[PartResult]) -> list[PartR
         return results
 
     def score(r: PartResult) -> int:
-        blob = " ".join([r.mpn, r.manufacturer, r.description, r.package, r.category,
+        blob = " ".join([r.mpn, r.supplier_pn, r.manufacturer, r.description, r.package, r.category,
                          *(str(v) for v in r.extra.values())]).lower()
         blob = re.sub(r"[\s\-_]", "", blob).replace("*", "x")
         return sum(t in blob for t in toks)
