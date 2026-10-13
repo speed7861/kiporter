@@ -10,6 +10,24 @@ PCB editor) and finds your open project automatically.
 
 Inspired by [Import-LIB-KiCad-Plugin](https://github.com/Steffen-W/Import-LIB-KiCad-Plugin).
 
+## Why I made Kiporter
+
+I built Kiporter out of frustration. Getting a part into KiCad, with its symbol, footprint and
+3D model all linked up, took far more work than it should:
+
+- **Too much setup.** Most import tools made me configure path variables, edit library tables
+  and fix 3D model paths by hand before anything worked. I'd lose time on configuration
+  instead of designing.
+- **Stuck in the board editor.** Most plugins only run from inside the PCB editor. When I'm
+  picking parts, I'm usually in the schematic, or KiCad isn't open at all.
+- **Scattered workflow.** Searching suppliers, downloading CAD files, unzipping them, importing
+  each piece and wiring up the links were all separate jobs in separate places.
+
+So I made a single program that runs on its own. It finds your KiCad install and open
+project, sets up the libraries and paths for you, and handles the whole job: search, preview,
+import, BOM and fabrication files. It's meant to work straight away, without the
+configuration.
+
 ## Features
 
 ### Search & Import
