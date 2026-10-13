@@ -233,6 +233,8 @@ If no preset fits, make a **custom Gerber setup**. You choose the layers, Gerber
   broken or legacy `${KISYS3DMOD}` paths, normalizes fields and fills missing data.
 - **Merge libraries** (including 3D models), and optionally re-point a project at the merged library.
 - **Make project self-contained:** copies every part a project uses into its project library.
+- **Switch back to original libraries:** undoes that, pointing the schematic and PCB back at the
+  libraries they used before. The copies in the project library are kept.
 - **Browse & preview** any library.
 - **KiCad setup check:** finds hidden stock libraries, broken library-table entries and a
   disabled API.

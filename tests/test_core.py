@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
 import pytest
 
 from kiporter import bom, fields, kicad_env, library, providers, render, sexpr
@@ -370,3 +371,32 @@ def test_lcsc_number_search_keeps_the_exact_part():
     hits = [PartResult(source="LCSC", mpn="1N4148WS", supplier_pn="C2128", description="Switching diode"),
             PartResult(source="LCSC", mpn="XC2128-ABC", supplier_pn="C3826377", description="Something else")]
     assert "C2128" in [r.supplier_pn for r in _best_keyword_matches("C2128", hits)]
+
+
+def test_switch_back_map_is_derived_from_the_backup(tmp_path):
+    from kiporter import libtools
+    old_sch = '''(kicad_sch (version 20250114)
+  (symbol (lib_id "PLEKTRON:10K") (at 1 1 0) (property "Reference" "R1" (at 0 0 0))
+    (property "Footprint" "PLEKTRON:R_0603" (at 0 0 0)) (uuid "aaaa"))
+  (symbol (lib_id "power:GND") (at 2 2 0) (property "Reference" "#PWR1" (at 0 0 0)) (uuid "bbbb")))'''
+    new_sch = old_sch.replace("PLEKTRON:10K", "Project_Parts:10K").replace("PLEKTRON:R_0603", "Project_Parts:R_0603")
+    old_pcb = '''(kicad_pcb (version 20241229)
+  (footprint "PLEKTRON:R_0603" (layer "F.Cu") (uuid "cccc") (model "${OLD}/R_0603.step")))'''
+    new_pcb = old_pcb.replace("PLEKTRON:R_0603", "Project_Parts:R_0603").replace("${OLD}", "${KIPRJMOD}/libs")
+    bk = tmp_path / "kiporter-backup" / "20260101-000000"
+    bk.mkdir(parents=True)
+    (bk / "p.kicad_sch").write_text(old_sch, encoding="utf-8")
+    (bk / "p.kicad_pcb").write_text(old_pcb, encoding="utf-8")
+    (tmp_path / "p.kicad_sch").write_text(new_sch, encoding="utf-8")
+    (tmp_path / "p.kicad_pcb").write_text(new_pcb, encoding="utf-8")
+    data = libtools._derive_localize_map(tmp_path)
+    assert data["sym"] == {"Project_Parts:10K": "PLEKTRON:10K"}
+    assert data["fp"] == {"Project_Parts:R_0603": "PLEKTRON:R_0603"}
+    assert data["model"] == {"${KIPRJMOD}/libs/R_0603.step": "${OLD}/R_0603.step"}
+    plan = libtools.UndoPlan(sym=data["sym"], fp=data["fp"], model=data["model"])
+    assert libtools.unlocalize_project(tmp_path, plan) > 0
+    assert (tmp_path / "p.kicad_sch").read_text(encoding="utf-8") == old_sch
+    assert (tmp_path / "p.kicad_pcb").read_text(encoding="utf-8") == old_pcb
+    libtools._save_localize_map(tmp_path, {"A:X": "P:X"}, {"A:F": "P:F"}, {})
+    saved = json.loads((tmp_path / "kiporter-backup" / libtools.LOCALIZE_MAP).read_text(encoding="utf-8"))
+    assert saved["sym"] == {"P:X": "A:X"} and saved["fp"] == {"P:F": "A:F"}

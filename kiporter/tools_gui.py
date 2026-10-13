@@ -151,6 +151,9 @@ TOOLS = [
     ("Make project self-contained",
      "Copies every symbol, footprint and 3D model the selected project uses into its project library and "
      "re-points the schematic and PCB at it - ideal before sharing or archiving a design.", "localize"),
+    ("Switch back to original libraries",
+     "Undoes 'Make project self-contained': points the selected project's schematic and PCB back at the libraries "
+     "they used before. The copies in the project library are kept.", "unlocalize"),
     ("KiCad setup check",
      "Finds path variables that hide KiCad's stock libraries/3D models, library-table entries pointing at "
      "missing files, and a disabled IPC API - and fixes them.", "setup"),
@@ -183,11 +186,54 @@ class ToolsTab(ttk.Frame):
 
     def open(self, key: str) -> None:
         cls = {"cleanup": CleanupDialog, "merge": MergeDialog, "localize": LocalizeDialog,
-               "setup": SetupCheckDialog, "browse": LibraryBrowserDialog, "backup": None}[key]
+               "setup": SetupCheckDialog, "browse": LibraryBrowserDialog, "backup": None, "unlocalize": None}[key]
         if key == "backup":
             self._backup()
             return
+        if key == "unlocalize":
+            self._unlocalize()
+            return
         self.dialogs.append(cls(self.app))
+
+    def _unlocalize(self) -> None:
+        app = self.app
+        p = app.current_project()
+        if not p:
+            messagebox.showinfo(APP_TITLE, "Select a project first.")
+            return
+        try:
+            libtools.check_project_closed(p.dir)
+        except libtools.ProjectLocked as e:
+            messagebox.showwarning(APP_TITLE, str(e))
+            return
+        app.set_status("Working out what was switched to the project library…")
+
+        def planned(plan: libtools.UndoPlan):
+            app.set_status("Ready")
+            for w in plan.skipped[:40]:
+                app.log("  ! " + w)
+            if not plan:
+                messagebox.showinfo(APP_TITLE, f"Nothing to switch back in {p.name}: Kiporter found no parts that "
+                                               "were moved to the project library."
+                                    + (f"\n\n{len(plan.skipped)} could not go back because their original library "
+                                       "is no longer registered (see log)." if plan.skipped else ""))
+                return
+            libs = sorted({v.split(":")[0] for v in list(plan.sym.values()) + list(plan.fp.values())})
+            if not messagebox.askyesno(
+                    APP_TITLE, f"Switch {p.name} back to its original libraries?\n\n"
+                               f"{len(plan.sym)} symbols and {len(plan.fp)} footprints go back to: {', '.join(libs)}\n"
+                               + (f"{len(plan.skipped)} stay on the project library because their original library "
+                                  "is no longer registered (see log).\n" if plan.skipped else "")
+                               + f"\nWorked out from {plan.source}. A backup of the schematic and PCB is made "
+                                 "first, and the copies in the project library are kept."):
+                return
+
+            def done(n: int):
+                app.set_status(f"Switched back to the original libraries ({n} references)")
+                messagebox.showinfo(APP_TITLE, f"{n} references now point at the original libraries again.\n\n"
+                                               "Open the project in KiCad to check it.")
+            app.run_bg(lambda: libtools.unlocalize_project(p.dir, plan, app.tlog), done, app._import_failed)
+        app.run_bg(lambda: libtools.localize_undo_plan(p.dir, app.ki), planned, app._import_failed)
 
     def _backup(self) -> None:
         win = tk.Toplevel(self.app)

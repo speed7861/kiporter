@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import shutil
 import subprocess
@@ -793,6 +794,7 @@ def localize_project(project_dir: Path, target: LibraryTarget, ki: KiCadInstall,
     _write_node(target.sym_file, tlib)
 
     out.references = remap_project(project_dir, sym_map, res.fp_map, res.model_map, log)
+    _save_localize_map(project_dir, sym_map, res.fp_map, res.model_map)
     out.warnings += res.warnings
     err = validate_sym_lib(ki, target.sym_file)
     if err:
@@ -800,6 +802,125 @@ def localize_project(project_dir: Path, target: LibraryTarget, ki: KiCadInstall,
     log(f"Localized {out.symbols} symbols, {out.footprints} footprints, {out.models} 3D models; "
         f"{out.references} references updated.")
     return out
+
+
+# ================================================================ undo "self-contained"
+LOCALIZE_MAP = "localize-map.json"
+
+
+def _save_localize_map(project_dir: Path, sym_map: dict, fp_map: dict, model_map: dict) -> None:
+    """Remember what was re-pointed (new -> original), so the project can be switched back later."""
+    f = project_dir / "kiporter-backup" / LOCALIZE_MAP
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    for key, fwd in (("sym", sym_map), ("fp", fp_map), ("model", model_map or {})):
+        inv = data.setdefault(key, {})
+        for old, new in fwd.items():
+            if old != new:
+                inv.setdefault(new, old)  # the first original wins when two parts were folded into one
+    try:
+        f.parent.mkdir(exist_ok=True)
+        f.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _placed(node: list, kind: str) -> dict[str, tuple[str, str, list[str]]]:
+    """uuid -> (library id, footprint id, 3D model paths) for the symbols or footprints placed in a file."""
+    out = {}
+    for item in sexpr.children(node, kind):
+        uid = sexpr.child(item, "uuid")
+        if not uid or len(uid) < 2:
+            continue
+        if kind == "symbol":
+            lib = sexpr.child(item, "lib_id")
+            if not lib:
+                continue
+            out[sexpr.unquote(uid[1])] = (sexpr.unquote(lib[1]), fields.get_property(item, "Footprint") or "", [])
+        elif len(item) > 1 and isinstance(item[1], str):
+            models = [sexpr.unquote(m[1]) for m in sexpr.children(item, "model") if len(m) > 1]
+            out[sexpr.unquote(uid[1])] = (sexpr.unquote(item[1]), "", models)
+    return out
+
+
+def _derive_localize_map(project_dir: Path) -> dict:
+    """Work out new -> original from the oldest full backup, matching parts by their unique id.
+    For projects made self-contained before Kiporter kept a record of it."""
+    root = project_dir / "kiporter-backup"
+    full = sorted(d for d in root.iterdir() if d.is_dir() and any(d.glob("*.kicad_pcb")) and any(d.glob("*.kicad_sch"))) \
+        if root.is_dir() else []
+    data: dict = {"sym": {}, "fp": {}, "model": {}}
+    if not full:
+        return data
+    for old_file in sorted(full[0].glob("*.kicad_sch")) + sorted(full[0].glob("*.kicad_pcb")):
+        cur_file = project_dir / old_file.name
+        if not cur_file.is_file():
+            continue
+        kind = "symbol" if old_file.suffix == ".kicad_sch" else "footprint"
+        old, cur = _placed(_read_node(old_file), kind), _placed(_read_node(cur_file), kind)
+        for uid, (cur_id, cur_fp, cur_models) in cur.items():
+            if uid not in old:
+                continue
+            old_id, old_fp, old_models = old[uid]
+            if cur_id != old_id and cur_id.split(":")[0] != old_id.split(":")[0]:
+                data["sym" if kind == "symbol" else "fp"].setdefault(cur_id, old_id)
+            if cur_fp and old_fp and cur_fp != old_fp and cur_fp.split(":")[0] != old_fp.split(":")[0]:
+                data["fp"].setdefault(cur_fp, old_fp)
+            if len(cur_models) == len(old_models):
+                for a, b in zip(cur_models, old_models):
+                    if a != b:
+                        data["model"].setdefault(a, b)
+    return data
+
+
+@dataclass
+class UndoPlan:
+    sym: dict = field(default_factory=dict)  # current id -> original id
+    fp: dict = field(default_factory=dict)
+    model: dict = field(default_factory=dict)
+    skipped: list[str] = field(default_factory=list)
+    source: str = ""  # where the record came from
+
+    def __bool__(self) -> bool:
+        return bool(self.sym or self.fp)
+
+
+def localize_undo_plan(project_dir: Path, ki: KiCadInstall) -> UndoPlan:
+    """What switching a self-contained project back to its original libraries would change."""
+    f = project_dir / "kiporter-backup" / LOCALIZE_MAP
+    try:
+        data, source = json.loads(f.read_text(encoding="utf-8")), "Kiporter's record of the switch"
+    except (OSError, ValueError):
+        data, source = _derive_localize_map(project_dir), "the oldest backup in kiporter-backup"
+    plan = UndoPlan(source=source)
+    known = {kind: {e.name for e in all_lib_entries(ki, project_dir, kind)} for kind in ("sym", "fp")}
+    for kind, target in (("sym", plan.sym), ("fp", plan.fp)):
+        for new, old in (data.get(kind) or {}).items():
+            lib = old.split(":")[0]
+            if lib in known[kind]:
+                target[new] = old
+            else:
+                plan.skipped.append(f"{old}: library '{lib}' is no longer in KiCad's library tables")
+    used_fp = set(plan.fp)
+    # a 3D model goes back only if its footprint does (model paths carry no library name to check)
+    plan.model = dict(data.get("model") or {}) if used_fp else {}
+    return plan
+
+
+def unlocalize_project(project_dir: Path, plan: UndoPlan, log: Log = _nolog) -> int:
+    """Point the schematic and PCB back at the libraries they used before 'Make project self-contained'.
+    The copies in the project library are left where they are."""
+    n = remap_project(project_dir, plan.sym, plan.fp, plan.model, log)
+    f = project_dir / "kiporter-backup" / LOCALIZE_MAP
+    if f.exists():
+        try:
+            f.replace(f.with_name(f"localize-map-undone-{_ts()}.json"))
+        except OSError:
+            pass
+    log(f"Switched back to the original libraries: {n} references updated.")
+    return n
 
 
 # ================================================================ KiCad setup check
