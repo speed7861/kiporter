@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -22,7 +24,7 @@ import requests
 from . import cad
 from .config import Settings, app_data_dir
 from .library import StagedPart
-from .providers import UA, PartResult, _norm_mpn
+from .providers import HTTP, UA, PartResult, _norm_mpn
 
 SOURCES = ["EasyEDA", "SamacSys", "Octopart", "SnapEDA"]
 DEFAULT_ORDER = ["EasyEDA", "SamacSys", "Octopart", "SnapEDA"]
@@ -33,6 +35,7 @@ CSE_SIGNUP = "https://componentsearchengine.com/signup"
 
 _lock = threading.Lock()
 _cse_cache: dict[str, list] = {}
+CSE_CACHE_DAYS = 30
 _octo_cache: dict[str, list] = {}
 _staged: dict[tuple, StagedPart] = {}
 
@@ -98,17 +101,39 @@ def _find_easyeda(r: PartResult) -> list[CadHit]:
     return [CadHit("EasyEDA", lcsc, s, f, m, f"LCSC {lcsc}", page=f"https://www.lcsc.com/product-detail/{lcsc}.html")]
 
 
+def _cse_file(key: str) -> Path:
+    d = app_data_dir() / "cse_cache"
+    d.mkdir(exist_ok=True)
+    return d / (hashlib.sha1(key.encode()).hexdigest() + ".json")
+
+
 def cse_search(mpn: str) -> list[dict]:
+    """SamacSys part search. Their server takes 10-15 s, so answers are kept on disk for a month."""
     key = mpn.strip().upper()
     if key in _cse_cache:
         return _cse_cache[key]
+    f = _cse_file(key)
     try:
-        r = requests.get(CSE_SEARCH, params={"searchString": mpn, "country": "US"}, headers=UA, timeout=25)
-        parts = r.json().get("parts") or [] if r.status_code == 200 else []
+        if time.time() - f.stat().st_mtime < CSE_CACHE_DAYS * 86400:
+            parts = json.loads(f.read_text(encoding="utf-8"))
+            with _lock:
+                _cse_cache[key] = parts
+            return parts
+    except (OSError, ValueError):
+        pass
+    try:
+        r = HTTP.get(CSE_SEARCH, params={"searchString": mpn, "country": "US"}, headers=UA, timeout=25)
+        ok = r.status_code == 200
+        parts = r.json().get("parts") or [] if ok else []
     except (requests.RequestException, ValueError):
-        parts = []
+        ok, parts = False, []
     with _lock:
         _cse_cache[key] = parts
+    if ok:
+        try:
+            f.write_text(json.dumps(parts), encoding="utf-8")
+        except OSError:
+            pass
     return parts
 
 
@@ -156,7 +181,7 @@ def _octopart_models(r: PartResult, settings: Settings) -> list[CadHit]:
     if key in _octo_cache:
         return _octo_cache[key]
     prov = Nexar(settings)
-    resp = requests.post(prov.GQL_URL, json={"query": OCTO_QUERY, "variables": {"q": r.mpn}},
+    resp = HTTP.post(prov.GQL_URL, json={"query": OCTO_QUERY, "variables": {"q": r.mpn}},
                          headers={"Authorization": f"Bearer {prov._get_token()}"}, timeout=30)
     d = resp.json()
     if d.get("errors") and not d.get("data"):
@@ -289,7 +314,7 @@ def cse_test_login(settings: Settings) -> str:
     """Check the Component Search Engine account with a real download of a common part."""
     if not (settings.cse_username and settings.cse_password):
         raise NeedsLogin("Enter your Component Search Engine username and password")
-    r = requests.get(CSE_MODEL, params={"partID": "2282"}, auth=(settings.cse_username, settings.cse_password),
+    r = HTTP.get(CSE_MODEL, params={"partID": "2282"}, auth=(settings.cse_username, settings.cse_password),
                      headers=UA, timeout=45)
     if r.status_code == 401:
         raise RuntimeError("Component Search Engine did not accept the username / password")
@@ -315,7 +340,7 @@ def fetch(hit: CadHit, settings: Settings, ki, data: dict | None = None) -> Stag
             if not (settings.cse_username and settings.cse_password):
                 raise NeedsLogin("Downloading SamacSys models needs your free Component Search Engine account "
                                  "(Settings → CAD sources).")
-            resp = requests.get(CSE_MODEL, params={"partID": hit.ref},
+            resp = HTTP.get(CSE_MODEL, params={"partID": hit.ref},
                                 auth=(settings.cse_username, settings.cse_password), headers=UA, timeout=60)
             if resp.status_code == 401:
                 raise NeedsLogin("Component Search Engine did not accept your username / password "
@@ -324,7 +349,7 @@ def fetch(hit: CadHit, settings: Settings, ki, data: dict | None = None) -> Stag
                 raise RuntimeError(f"SamacSys download failed (HTTP {resp.status_code})")
             path = _save_zip("SamacSys", hit.ref, resp.content)
         else:  # Octopart / SnapEDA download links
-            resp = requests.get(hit.ref, headers=UA, timeout=60, allow_redirects=True)
+            resp = HTTP.get(hit.ref, headers=UA, timeout=60, allow_redirects=True)
             if resp.status_code != 200 or not resp.content.startswith(b"PK"):
                 raise NeedsBrowser(f"{hit.source} wants you to sign in to download this model.", hit.ref)
             path = _save_zip(hit.source, hit.ref, resp.content)

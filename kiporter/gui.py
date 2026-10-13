@@ -19,6 +19,7 @@ from .config import Settings, app_data_dir
 from .providers import PartResult
 
 APP_TITLE = "Kiporter"
+SEARCH_CACHE_S = 300  # a repeated search within 5 minutes is answered from memory
 NEW_LIB = "➕  New library…"
 
 # results table: column id -> (heading, width, sort key)
@@ -56,6 +57,7 @@ class App(tk.Tk):
         self.global_libs: list[library.LibraryTarget] = []
         self._ui_q: queue.Queue = queue.Queue()
         self._search_gen = 0
+        self._search_cache: dict[tuple, tuple] = {}
         self._cad_queued: set[str] = set()
         self._pending_jobs = 0
         self._ipc_version = ""
@@ -650,8 +652,16 @@ class App(tk.Tk):
         limit = max(1, min(int(self.settings.search_limit or 50), 50))
         for name in names:
             prov = self.providers[name]
-            self.run_bg(lambda p=prov: p.search(kw, limit), lambda res, n=name: self._add_results(gen, n, res),
-                        lambda e, n=name: self._search_failed(gen, n, e))
+            key = (name, kw.lower(), limit)
+            hit = self._search_cache.get(key)
+            if hit and time.time() - hit[0] < SEARCH_CACHE_S:  # same search again: no need to ask twice
+                self._add_results(gen, name, hit[1])
+                continue
+
+            def got(res, n=name, key=key):
+                self._search_cache[key] = (time.time(), res)
+                self._add_results(gen, n, res)
+            self.run_bg(lambda p=prov: p.search(kw, limit), got, lambda e, n=name: self._search_failed(gen, n, e))
 
     def _search_done_one(self, gen: int) -> None:
         if gen != self._search_gen:
@@ -832,7 +842,7 @@ class App(tk.Tk):
         self.preview.set_3d(None, "The 3D view appears here once the model has loaded" if
                             self.settings.preview_3d else "3D preview off (Settings → Search)")
         # debounce: only load if the user stays on this row
-        self.after(250, lambda: self._load_preview(token, r))
+        self.after(120, lambda: self._load_preview(token, r))
 
     def _load_preview(self, token: int, r: PartResult) -> None:
         if token != self._preview_token:
@@ -919,11 +929,7 @@ class App(tk.Tk):
         self.preview.set_symbol(None, None, loading)
         self.preview.set_footprint(None, loading)
 
-        def done(part):
-            if token != self._preview_token or self._hit is not h:
-                return
-            key = f"{h.source}_{re.sub(r'[^A-Za-z0-9]+', '_', h.ref)[-60:]}"
-            self._preview_part = (token, key, part)
+        def draw(part):
             try:
                 lib = sexpr.parse(part.symbol_files[0].read_text(encoding="utf-8", errors="replace")) \
                     if part.symbol_files else None
@@ -934,6 +940,17 @@ class App(tk.Tk):
                 self.preview.set_footprint(fpn, "This model has no footprint")
             except (ValueError, OSError) as e:
                 self.preview.set_symbol(None, None, f"Preview failed: {e}")
+
+        def early(part):  # symbol and footprint first; the 3D model is still on its way
+            if part and token == self._preview_token and self._hit is h and self._preview_part is None:
+                draw(part)
+
+        def done(part):
+            if token != self._preview_token or self._hit is not h:
+                return
+            key = f"{h.source}_{re.sub(r'[^A-Za-z0-9]+', '_', h.ref)[-60:]}"
+            self._preview_part = (token, key, part)
+            draw(part)
             if self.preview.current_tab() == "3D":
                 self._render_3d()
 
@@ -947,6 +964,8 @@ class App(tk.Tk):
             self.preview.set_footprint(None, msg)
             self.preview.set_3d(None, msg)
             self._update_count_status()
+        if h.source == "EasyEDA":
+            self.run_bg(lambda: cad.quick(h.ref), early, lambda e: None)
         self.run_bg(lambda: cad_sources.fetch(h, self.settings, self.ki), done, fail)
 
     def _render_3d(self) -> None:

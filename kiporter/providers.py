@@ -12,7 +12,9 @@ import hmac
 import re
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from http.cookiejar import DefaultCookiePolicy
 from urllib.parse import quote_plus
 
 import requests
@@ -20,6 +22,12 @@ import requests
 from .config import Settings
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Kiporter/2.0"}
+# one shared session: connections stay open, which saves about a second per request
+HTTP = requests.Session()
+# no cookies: JLCPCB answers 403 once it has handed out an XSRF cookie and gets it back without the header
+HTTP.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+for _prefix in ("https://", "http://"):
+    HTTP.mount(_prefix, requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16))
 TIMEOUT = 25
 
 
@@ -219,22 +227,23 @@ class LCSC(Provider):
         nothing, "2.54mm header" finds thousands), so reworded versions are tried until enough turn up."""
         found: dict[str, PartResult] = {}
         strict, relaxed = _keyword_variants(keyword)
-        for kw in strict:
-            for r in self._query(kw, limit):
-                found.setdefault(r.lcsc_id or r.mpn, r)
-            if len(found) >= limit:
-                break
-        if not found:
-            for kw in relaxed:
-                for r in self._query(kw, 100):
+        for kws, n in ((strict, limit), (relaxed, 100)):
+            if not kws or found:
+                continue
+            # all rewordings at once; a failed one only matters if every one of them fails
+            with ThreadPoolExecutor(max_workers=len(kws)) as pool:
+                jobs = [pool.submit(self._query, kw, n) for kw in kws]
+            errors = [j.exception() for j in jobs if j.exception()]
+            if len(errors) == len(jobs):
+                raise errors[0]
+            for j in jobs:
+                for r in ([] if j.exception() else j.result()):
                     found.setdefault(r.lcsc_id or r.mpn, r)
-                if len(found) >= 2 * limit:
-                    break
         return _best_keyword_matches(keyword, list(found.values()))[:limit]
 
     def _query(self, keyword: str, limit: int = 50) -> list[PartResult]:
         try:
-            r = requests.post(JLC_SEARCH, json={"keyword": keyword, "currentPage": 1, "pageSize": limit},
+            r = HTTP.post(JLC_SEARCH, json={"keyword": keyword, "currentPage": 1, "pageSize": limit},
                               headers=UA, timeout=TIMEOUT)
             r.raise_for_status()
             data = r.json()
@@ -375,7 +384,7 @@ class DigiKey(Provider):
         if self._token and time.time() < self._token_exp - 30:
             return self._token
         try:
-            r = requests.post(self.TOKEN_URL, data={
+            r = HTTP.post(self.TOKEN_URL, data={
                 "client_id": self.s.digikey_client_id.strip(),
                 "client_secret": self.s.digikey_client_secret.strip(),
                 "grant_type": "client_credentials",
@@ -404,7 +413,7 @@ class DigiKey(Provider):
         if self.s.in_stock_only:
             body["FilterOptionsRequest"] = {"SearchOptions": ["InStock"]}
         try:
-            r = requests.post(self.SEARCH_URL, json=body, headers=headers, timeout=TIMEOUT)
+            r = HTTP.post(self.SEARCH_URL, json=body, headers=headers, timeout=TIMEOUT)
         except requests.RequestException as e:
             raise ProviderError(f"Digi-Key search failed: {e}") from e
         if r.status_code != 200:
@@ -472,7 +481,7 @@ class Mouser(Provider):
                                            "searchOptions": "InStock" if self.s.in_stock_only else "",
                                            "searchWithYourSignUpLanguage": ""}}
         try:
-            r = requests.post(self.SEARCH_URL, params={"apiKey": self.s.mouser_api_key.strip()},
+            r = HTTP.post(self.SEARCH_URL, params={"apiKey": self.s.mouser_api_key.strip()},
                               json=body, timeout=TIMEOUT)
             d = r.json()
         except (requests.RequestException, ValueError) as e:
@@ -540,7 +549,7 @@ class Element14(Provider):
         if self.s.in_stock_only:
             params["resultsSettings.refinements.filters"] = "inStock"
         try:
-            r = requests.get(self.URL, params=params, timeout=TIMEOUT)
+            r = HTTP.get(self.URL, params=params, timeout=TIMEOUT)
         except requests.RequestException as e:
             raise ProviderError(f"{label} search failed: {e}") from e
         if r.status_code != 200:
@@ -599,7 +608,7 @@ class TME(Provider):
                                         hashlib.sha1).digest()).decode()
         ordered.append(("ApiSignature", sig))
         try:
-            r = requests.post(url, data=urllib.parse.urlencode(ordered),
+            r = HTTP.post(url, data=urllib.parse.urlencode(ordered),
                               headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=TIMEOUT)
             d = r.json()
         except (requests.RequestException, ValueError) as e:
@@ -684,7 +693,7 @@ class Nexar(Provider):
         if self._token and time.time() < self._exp - 60:
             return self._token
         try:
-            r = requests.post(self.TOKEN_URL, data={
+            r = HTTP.post(self.TOKEN_URL, data={
                 "grant_type": "client_credentials", "client_id": self.s.nexar_client_id.strip(),
                 "client_secret": self.s.nexar_client_secret.strip(), "scope": "supply.domain"}, timeout=TIMEOUT)
         except requests.RequestException as e:
@@ -699,7 +708,7 @@ class Nexar(Provider):
         if not self.configured:
             raise NotConfigured("Octopart/Nexar is not connected")
         try:
-            r = requests.post(self.GQL_URL, json={"query": NEXAR_QUERY,
+            r = HTTP.post(self.GQL_URL, json={"query": NEXAR_QUERY,
                                                   "variables": {"q": keyword, "limit": min(limit, 50)}},
                               headers={"Authorization": f"Bearer {self._get_token()}"}, timeout=TIMEOUT)
             d = r.json()

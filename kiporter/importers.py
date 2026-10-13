@@ -4,6 +4,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .kicad_env import NO_WINDOW, KiCadInstall
@@ -19,7 +20,18 @@ def _tmpdir(prefix: str) -> Path:
 
 
 # ---------------------------------------------------------------- EasyEDA / LCSC
-def stage_lcsc(lcsc_id: str, data: dict[str, str] | None = None, cad: dict | None = None) -> StagedPart:
+_api_cache: list = []
+
+
+def _easyeda_api(cls):
+    """One EasyEDA client for the whole session (building it loads the certificate store each time)."""
+    if not _api_cache:
+        _api_cache.append(cls())
+    return _api_cache[0]
+
+
+def stage_lcsc(lcsc_id: str, data: dict[str, str] | None = None, cad: dict | None = None,
+               models: bool = True) -> StagedPart:
     try:
         from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
         from easyeda2kicad.easyeda.easyeda_importer import (
@@ -31,7 +43,7 @@ def stage_lcsc(lcsc_id: str, data: dict[str, str] | None = None, cad: dict | Non
         raise ImportError_("easyeda2kicad is not installed - run the installer again") from e
 
     lcsc_id = lcsc_id.strip().upper()
-    api = EasyedaApi()
+    api = _easyeda_api(EasyedaApi)
     cad = cad or api.get_cad_data_of_component(lcsc_id=lcsc_id)
     if not cad:
         raise ImportError_(f"EasyEDA has no CAD data for {lcsc_id}")
@@ -41,29 +53,39 @@ def stage_lcsc(lcsc_id: str, data: dict[str, str] | None = None, cad: dict | Non
     part = StagedPart(data=dict(data or {}), source=f"EasyEDA {lcsc_id}")
     part.data.setdefault("lcsc", lcsc_id)
 
-    sym = EasyedaSymbolImporter(easyeda_cp_cad_data=cad).get_symbol()
-    sym_path = f"{out}.kicad_sym"
-    ExporterSymbolKicad(symbol=sym, lib_path=sym_path).save_to_lib(
-        lib_path=sym_path, footprint_lib_name="staging", overwrite=True)
-    part.symbol_files.append(Path(sym_path))
+    def fetch_model() -> list[Path]:
+        if not models:
+            return []
+        try:
+            model = Exporter3dModelKicad(model_3d=Easyeda3dModelImporter(
+                easyeda_cp_cad_data=cad, download_raw_3d_model=True, api=api).output)
+            if model.output and model.export(output_dir=f"{out}.3dshapes", overwrite=True):
+                md = Path(f"{out}.3dshapes")
+                # the footprint references the .wrl (offsets are baked into it); keep STEP too
+                return sorted(md.glob("*.wrl")) + sorted(md.glob("*.step"))
+        except Exception:  # 3D models are optional; never fail the import for them
+            pass
+        return []
 
-    fp = EasyedaFootprintImporter(easyeda_cp_cad_data=cad).get_footprint()
-    fp_dir = Path(f"{out}.pretty")
-    fp_dir.mkdir(parents=True, exist_ok=True)
-    fp_file = fp_dir / f"{fp.info.name}.kicad_mod"
-    ExporterFootprintKicad(footprint=fp).export(
-        footprint_full_path=str(fp_file), model_3d_path=Path(f"{out}.3dshapes").as_posix())
-    part.footprint_files.append(fp_file)
+    # the 3D model is a separate download: fetch it while the symbol and footprint convert
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        model_job = pool.submit(fetch_model)
 
-    try:
-        model = Exporter3dModelKicad(model_3d=Easyeda3dModelImporter(
-            easyeda_cp_cad_data=cad, download_raw_3d_model=True, api=api).output)
-        if model.output and model.export(output_dir=f"{out}.3dshapes", overwrite=True):
-            md = Path(f"{out}.3dshapes")
-            # the footprint references the .wrl (offsets are baked into it); keep STEP too
-            part.model_files += sorted(md.glob("*.wrl")) + sorted(md.glob("*.step"))
-    except Exception:  # 3D models are optional; never fail the import for them
-        pass
+        sym = EasyedaSymbolImporter(easyeda_cp_cad_data=cad).get_symbol()
+        sym_path = f"{out}.kicad_sym"
+        ExporterSymbolKicad(symbol=sym, lib_path=sym_path).save_to_lib(
+            lib_path=sym_path, footprint_lib_name="staging", overwrite=True)
+        part.symbol_files.append(Path(sym_path))
+
+        fp = EasyedaFootprintImporter(easyeda_cp_cad_data=cad).get_footprint()
+        fp_dir = Path(f"{out}.pretty")
+        fp_dir.mkdir(parents=True, exist_ok=True)
+        fp_file = fp_dir / f"{fp.info.name}.kicad_mod"
+        ExporterFootprintKicad(footprint=fp).export(
+            footprint_full_path=str(fp_file), model_3d_path=Path(f"{out}.3dshapes").as_posix())
+        part.footprint_files.append(fp_file)
+
+        part.model_files += model_job.result()
     return part
 
 

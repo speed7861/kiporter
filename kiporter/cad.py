@@ -33,6 +33,7 @@ MIN_GAP_S = 1.0  # at most about one EasyEDA request per second
 BACKOFF_MIN = [2, 5, 15, 30]  # minutes to wait after successive blocks
 
 _lock = threading.Lock()
+_fetch_lock = threading.Lock()
 _CACHE_FILE = app_data_dir() / "cad_cache.json"
 _avail: dict[str, list] = {}
 _equiv: dict[str, str] = {}
@@ -115,11 +116,12 @@ def _pace() -> None:
 def _fetch(lcsc_id: str) -> dict:
     """One request to EasyEDA. Raises EasyedaBlocked / EasyedaNoData."""
     import requests
+    from .providers import HTTP
     if blocked_for():
         raise EasyedaBlocked(blocked_message())
     _pace()
     try:
-        r = requests.get(EASYEDA_URL.format(lcsc_id), headers=HEADERS, timeout=30)
+        r = HTTP.get(EASYEDA_URL.format(lcsc_id), headers=HEADERS, timeout=30)
     except requests.RequestException as e:
         raise RuntimeError(f"Could not reach EasyEDA: {e}") from e
     if r.status_code in (403, 429):
@@ -148,9 +150,12 @@ def cad_data(lcsc_id: str) -> dict:
             return data
         except (OSError, ValueError):
             pass
-    data = _fetch(lcsc_id)
-    with _lock:
-        _cad_json[lcsc_id] = data
+    with _fetch_lock:  # two callers asking for the same part must not turn into two requests
+        if lcsc_id in _cad_json:
+            return _cad_json[lcsc_id]
+        data = _fetch(lcsc_id)
+        with _lock:
+            _cad_json[lcsc_id] = data
     try:
         f.write_text(json.dumps(data), encoding="utf-8")
     except OSError:
@@ -260,6 +265,16 @@ def _load_staged(d: Path, lcsc_id: str) -> StagedPart | None:
     return StagedPart(syms, fps, models, {}, f"EasyEDA {lcsc_id}")
 
 
+def quick(lcsc_id: str) -> StagedPart | None:
+    """Symbol and footprint only, to show while the 3D model is still downloading.
+    None when the full part is already on disk (then staged() is instant anyway)."""
+    from .importers import stage_lcsc
+    lcsc_id = lcsc_id.strip().upper()
+    if lcsc_id in _staged or (_dir("parts") / lcsc_id).exists():
+        return None
+    return stage_lcsc(lcsc_id, {}, cad=cad_data(lcsc_id), models=False)
+
+
 def staged(lcsc_id: str, data: dict | None = None) -> StagedPart:
     """Symbol/footprint/3D files for an LCSC part, converted once and kept on disk."""
     from .importers import stage_lcsc
@@ -291,13 +306,25 @@ def staged(lcsc_id: str, data: dict | None = None) -> StagedPart:
 
 
 def image_bytes(url: str, timeout: int = 20) -> bytes | None:
+    """Part photo, kept on disk so it only downloads once."""
     if not url:
         return None
+    import hashlib
     import requests
-    from .providers import UA
+    from .providers import HTTP, UA
+    f = _dir("photos") / hashlib.sha1(url.encode()).hexdigest()
     try:
-        r = requests.get(url, headers={**UA, "Referer": "https://jlcpcb.com/"}, timeout=timeout)
+        if f.exists():
+            return f.read_bytes()
+    except OSError:
+        pass
+    try:
+        r = HTTP.get(url, headers={**UA, "Referer": "https://jlcpcb.com/"}, timeout=timeout)
         if r.status_code == 200 and len(r.content) > 200:
+            try:
+                f.write_bytes(r.content)
+            except OSError:
+                pass
             return r.content
     except requests.RequestException:
         pass
