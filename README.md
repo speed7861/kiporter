@@ -208,6 +208,9 @@ Click **Save** when you're done.
   **Use suggested LCSC part** switches the selected BOM lines to it, so the LCSC column is
   filled in for JLCPCB exports (right-click to switch back). Similar parts are not checked for
   tolerance, rating or suffix - check those yourself.
+- **Save to schematic:** writes the switched part numbers into the fields of the symbols already
+  in your schematic. No symbol or footprint is replaced or moved, and a backup is kept. Close the
+  Schematic Editor first, then run Update PCB from Schematic to copy the fields to the board.
 - **Export for board houses:** JLCPCB, PCBWay, ALLPCB, Seeed Fusion, NextPCB, Eurocircuits,
   Aisler, MacroFab, with pick-and-place/CPL files.
 - **Export for distributor BOM tools:** Digi-Key, Mouser and LCSC.

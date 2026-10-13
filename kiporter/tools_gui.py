@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING, Callable
 
-from . import alternatives, bom, kicad_control, library, libtools, providers, render, sexpr, ui
+from . import alternatives, bom, fields, kicad_control, kicad_env, library, libtools, providers, render, schedit, sexpr, ui
 
 if TYPE_CHECKING:
     from .gui import App
@@ -661,6 +661,7 @@ class BomTab(ttk.Frame):
         ttk.Button(bar, text="Stock report…", command=self.export_stock).pack(side="left", padx=6)
         self.switch_btn = ttk.Button(bar, text="Use suggested LCSC part", command=self.use_suggested)
         self.switch_btn.pack(side="left")
+        ttk.Button(bar, text="Save to schematic…", command=self.save_to_schematic).pack(side="left", padx=6)
         self.info = tk.StringVar(value="Load the BOM of the selected project (reads the saved schematic and PCB).")
         ttk.Label(self, textvariable=self.info, style="Muted.TLabel").pack(fill="x", pady=(6, 0))
         frame = ttk.Frame(self)
@@ -684,10 +685,12 @@ class BomTab(ttk.Frame):
         self.menu.add_command(label="Use suggested LCSC part", command=self.use_suggested)
         self.menu.add_command(label="Use every suggestion that is the same part", command=self.use_same_parts)
         self.menu.add_command(label="Switch back to the original part", command=self.switch_back)
+        self.menu.add_command(label="Save switched parts to the schematic…", command=self.save_to_schematic)
         self.menu.add_separator()
         self.menu.add_command(label="Search for this part", command=self._search_line)
         self.tree.bind("<Button-3>", self._popup)
         self.tree.bind("<Button-2>", self._popup)  # macOS
+        self.tree.bind("<Control-a>", lambda e: (self.tree.selection_set(self.tree.get_children()), "break")[1])
         self._setup_columns()
 
     def settings_changed(self) -> None:
@@ -896,17 +899,79 @@ class BomTab(ttk.Frame):
                       "No suggestion to use on the selected line(s) - run 'Check stock & lead times' first.")
 
     def use_suggested(self) -> None:
-        sel = [self.lines[int(i)] for i in self.tree.selection()]
-        if not sel:
-            messagebox.showinfo(APP_TITLE, "Select one or more BOM lines that have a suggested LCSC part.")
+        """Switch the selected lines - or, with nothing selected, every line - to its suggested LCSC part."""
+        sel = [self.lines[int(i)] for i in self.tree.selection()] or list(self.lines)
+        todo = [l for l in sel if l.original is None and not l.dnp and alternatives.best(l, self._need(l))]
+        if not todo:
+            messagebox.showinfo(APP_TITLE, "There is no suggested LCSC part to use. Run 'Check stock & lead times' "
+                                           "first; lines that already have an LCSC number get no suggestion.")
             return
-        similar = [l for l in sel if l.original is None and (a := alternatives.best(l, self._need(l))) and not a.exact]
-        if similar and not messagebox.askyesno(
-                APP_TITLE, f"{len(similar)} of the selected suggestions are a similar part, not the same one "
-                           "(same family, or same value and package).\n\nTolerance, voltage rating and suffix are "
-                           "not checked. Switch them anyway?"):
+        similar = [l for l in todo if not alternatives.best(l, self._need(l)).exact]
+        if similar:
+            names = ", ".join(l.refs_str for l in similar[:6]) + (" …" if len(similar) > 6 else "")
+            ans = messagebox.askyesnocancel(
+                APP_TITLE, f"{len(todo) - len(similar)} suggestion(s) are the same part and will be used.\n\n"
+                           f"{len(similar)} are a similar part, not the same one ({names}). Maker, suffix, tolerance "
+                           "and rating are not checked.\n\nUse the similar ones too?\n"
+                           "Yes = use all, No = only the same parts, Cancel = do nothing.")
+            if ans is None:
+                return
+            if not ans:
+                todo = [l for l in todo if l not in similar]
+        self._switch(todo)
+
+    def save_to_schematic(self) -> None:
+        """Write the switched parts into the fields of the symbols already in the schematic."""
+        p = self.app.current_project()
+        lines = [l for l in self.lines if l.original is not None]
+        if not p or not lines:
+            messagebox.showinfo(APP_TITLE, "Nothing to save yet. Use 'Use suggested LCSC part' first.")
             return
-        self._switch(sel)
+        if any("Schematic Editor" in t and p.name in t for _, t in kicad_env.kicad_window_titles()):
+            messagebox.showwarning(
+                APP_TITLE, f"The schematic of {p.name} is open in KiCad.\n\nSave your work and close the Schematic "
+                           "Editor first (the project window can stay open). KiCad would otherwise overwrite these "
+                           "changes the next time it saves.")
+            return
+        updates: dict[str, dict[str, str]] = {}
+        for ln in lines:
+            old = ln.original[0]
+            data = {"lcsc": ln.lcsc}
+            if ln.mpn != old.get("mpn", ""):  # a different part: its number and maker go in too
+                data.update(mpn=ln.mpn, manufacturer=ln.manufacturer)
+            for ref in ln.refs:
+                updates[ref] = data
+        sch = p.pro_file.with_suffix(".kicad_sch")
+        names = fields.field_names(self.app.settings.field_names)
+        try:
+            count, files, texts = schedit.set_fields(sch, updates, names)
+        except (OSError, ValueError) as e:
+            messagebox.showerror(APP_TITLE, f"Could not read the schematic:\n{e}")
+            return
+        if not count:
+            messagebox.showinfo(APP_TITLE, "The schematic already has these part numbers.")
+            return
+        if not messagebox.askyesno(
+                APP_TITLE, f"Write the part numbers of {len(lines)} BOM line(s) into {count} symbol(s) in the "
+                           f"schematic?\n\nOnly the fields change ({names['lcsc']}"
+                           + (f", {names['mpn']}, {names['manufacturer']}" if any(len(u) > 1 for u in updates.values())
+                              else "")
+                           + "). No symbol or footprint is replaced or moved.\n\n"
+                           f"Files: {', '.join(f.name for f in files)}\nA backup is saved first."):
+            return
+        backup = libtools.backup_files(files, p.dir / "kiporter-backup")
+        try:
+            schedit.write(texts)
+        except OSError as e:
+            messagebox.showerror(APP_TITLE, f"Could not write the schematic:\n{e}\n\nBackup: {backup}")
+            return
+        for ln in lines:
+            ln.original = None  # now the schematic's own data
+            ln.alts = {}
+        self._redraw()
+        self.app.log(f"Saved part numbers of {len(lines)} BOM lines to {count} schematic symbols. Backup: {backup}")
+        self.info.set(f"Saved to the schematic ({count} symbols). Open it in KiCad and press 'Update PCB from "
+                      "Schematic' to copy the fields to the board.")
 
     def use_same_parts(self) -> None:
         self._switch(list(self.lines), only_exact=True)

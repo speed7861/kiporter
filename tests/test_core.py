@@ -330,3 +330,34 @@ def test_bom_value_used_as_part_number():
     assert stock_status(q, 6) == "ok"
     alt.switch(q, a)
     assert q.lcsc == "C82460" and q.mpn == "MMBT2222ALT1G"
+
+
+def test_schematic_fields_are_written_in_place(tmp_path):
+    from kiporter import fields, schedit
+    sub_sheet = '''(kicad_sch (version 20250114) (generator "eeschema")
+  (symbol (lib_id "Device:Q_NPN") (at 10 10 0) (unit 1)
+    (property "Reference" "Q1" (at 12 9 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "MMBT2222A" (at 12 11 0) (effects (font (size 1.27 1.27))))
+    (property "Datasheet" "~" (at 10 10 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "LCSC" "" (at 10 10 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (instances (project "p" (path "/a/b" (reference "Q8") (unit 1))))))'''
+    root = '''(kicad_sch (version 20250114) (generator "eeschema")
+  (lib_symbols (symbol "Device:R" (property "Reference" "R" (at 0 0 0))))
+  (symbol (lib_id "Device:R") (at 5 5 0) (unit 1)
+    (property "Reference" "R1" (at 6 5 0) (effects (font (size 1.27 1.27))))
+    (property "Datasheet" "~" (at 5 5 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (instances (project "p" (path "/a" (reference "R1") (unit 1)))))
+  (sheet (at 0 0) (size 10 10) (property "Sheetname" "S") (property "Sheetfile" "sub.kicad_sch")))'''
+    (tmp_path / "root.kicad_sch").write_text(root, encoding="utf-8")
+    (tmp_path / "sub.kicad_sch").write_text(sub_sheet, encoding="utf-8")
+    names = fields.field_names()
+    upd = {"Q8": {"lcsc": "C82460", "mpn": "MMBT2222ALT1G"}, "R1": {"lcsc": "C25804"}}
+    count, files, texts = schedit.set_fields(tmp_path / "root.kicad_sch", upd, names)
+    assert count == 2 and len(files) == 2
+    schedit.write(texts)
+    sub_text = (tmp_path / "sub.kicad_sch").read_text(encoding="utf-8")
+    assert '(property "LCSC" "C82460"' in sub_text and '"MPN" "MMBT2222ALT1G"' in sub_text  # alias reused, MPN added
+    root_text = (tmp_path / "root.kicad_sch").read_text(encoding="utf-8")
+    assert '"LCSC Part" "C25804"' in root_text and '(symbol "Device:R"' in root_text
+    assert root_text.count("C25804") == 1  # the library copy of the symbol is left alone
+    assert schedit.set_fields(tmp_path / "root.kicad_sch", upd, names)[0] == 0
