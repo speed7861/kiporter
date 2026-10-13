@@ -184,6 +184,9 @@ Click **Save** when you're done.
 - **Consistent symbol fields across all sources:** Manufacturer, MPN, Package, Datasheet,
   Description and each supplier's part number. Vendor spellings such as `MFGR` or
   `Manufacturer_Name` are folded into these names.
+- **ANSI or IEC resistors:** suppliers mostly draw resistors as IEC boxes. Kiporter redraws plain
+  resistors as ANSI zigzags on import (or as IEC boxes, or leaves them alone - your choice in
+  Settings → Libraries).
 - **Choose the destination library at start-up:** the project library, one of your existing
   local libraries, or a new one. Kiporter registers it in KiCad's library tables and links
   the 3D paths automatically.

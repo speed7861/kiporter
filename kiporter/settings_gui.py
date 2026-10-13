@@ -8,7 +8,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING
 
-from . import __version__, bom, fields, guides, kicad_control, kicad_env, providers, ui
+from . import __version__, bom, fields, guides, kicad_control, kicad_env, providers, symstyle, ui
 from .config import SETTINGS_FILE, Settings, app_data_dir
 
 if TYPE_CHECKING:
@@ -306,6 +306,10 @@ class SettingsTab(ttk.Frame):
         self.row(p, "import_footprint", "Footprint", "bool")
         self.row(p, "import_3d", "3D model", "bool")
         self.row(p, "overwrite_existing", "Overwrite parts that already exist in the library", "bool")
+        self.section(p, "Symbol style")
+        self.row(p, "symbol_style", "Draw resistors as", "choice", symstyle.STYLES)
+        self.note(p, "Suppliers mostly draw resistors as IEC boxes. Kiporter redraws plain two-pin resistors in the "
+                     "style you pick; other symbols are left as supplied.")
         r = self._next(p)
         bf = ttk.Frame(p)
         bf.grid(row=r, column=0, columnspan=3, sticky="w", pady=(12, 0))

@@ -1,2 +1,2 @@
 """Kiporter - search LCSC / Digi-Key / Mouser and import parts into KiCad."""
-__version__ = "2.1.0"
+__version__ = "2.2.0"

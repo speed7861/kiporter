@@ -68,6 +68,7 @@ class Settings:
     import_footprint: bool = True
     import_3d: bool = True
     overwrite_existing: bool = False
+    symbol_style: str = "ansi"  # ansi | iec | keep (see symstyle.py)
     # ---- supplier credentials
     digikey_client_id: str = ""
     digikey_client_secret: str = ""

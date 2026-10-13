@@ -324,7 +324,13 @@ def cse_test_login(settings: Settings) -> str:
 
 
 def fetch(hit: CadHit, settings: Settings, ki, data: dict | None = None) -> StagedPart:
-    """Download (or reuse) the model files for a hit. Raises NeedsLogin / NeedsBrowser."""
+    """Download (or reuse) the model files for a hit, with symbols in the user's drawing style.
+    Raises NeedsLogin / NeedsBrowser."""
+    from . import symstyle
+    return symstyle.restyle_part(_fetch(hit, settings, ki, data), settings.symbol_style)
+
+
+def _fetch(hit: CadHit, settings: Settings, ki, data: dict | None = None) -> StagedPart:
     from dataclasses import replace
     from .importers import stage_zip
     if hit.source == "EasyEDA":

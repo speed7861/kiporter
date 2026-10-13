@@ -14,7 +14,8 @@ from tkinter import filedialog, messagebox, simpledialog
 import tkinter as tk
 from tkinter import ttk
 
-from . import __version__, cad, cad_sources, fields, importers, kicad_control, kicad_env, library, providers, render, sexpr, ui
+from . import (__version__, cad, cad_sources, fields, importers, kicad_control, kicad_env, library, providers,
+               render, sexpr, symstyle, ui)
 from .config import Settings, app_data_dir
 from .providers import PartResult
 
@@ -943,7 +944,7 @@ class App(tk.Tk):
 
         def early(part):  # symbol and footprint first; the 3D model is still on its way
             if part and token == self._preview_token and self._hit is h and self._preview_part is None:
-                draw(part)
+                draw(symstyle.restyle_part(part, self.settings.symbol_style))
 
         def done(part):
             if token != self._preview_token or self._hit is not h:
@@ -1192,7 +1193,8 @@ class App(tk.Tk):
             self._pending_cad_part = None
             self._import_done(res, target, path.name)
 
-        self.run_bg(lambda: library.install(target, importers.stage_zip(path, self.ki, data), **opts),
+        self.run_bg(lambda: library.install(target, symstyle.restyle_part(
+            importers.stage_zip(path, self.ki, data), self.settings.symbol_style), **opts),
                     done, self._import_failed)
 
     def _watch_toggled(self) -> None:

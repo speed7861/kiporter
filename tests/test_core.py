@@ -216,3 +216,21 @@ def test_lcsc_keyword_variants():
     hits = [PartResult(source="LCSC", mpn="2.54-1*4P", description="Pin Header"),
             PartResult(source="LCSC", mpn="XH-3A", description="Header")]
     assert [r.mpn for r in _best_keyword_matches("header 2.54 mm 1x4", hits)] == ["2.54-1*4P"]
+
+
+def test_resistor_symbol_style():
+    from kiporter import sexpr, symstyle
+    src = ('(symbol "R10K" (in_bom yes) (on_board yes) (property "Reference" "R" (id 0) (at 0 5.08 0)) '
+           '(property "Value" "R10K" (id 1) (at 0 -5.08 0)) (property "ki_keywords" "{kw}" (id 2) (at 0 0 0)) '
+           '(symbol "R10K_0_1" (rectangle (start -2.54 1.02) (end 2.54 -1.02)) '
+           '(pin input line (at 5.08 0 180) (length 2.54) (name "2") (number "2")) '
+           '(pin input line (at -5.08 0 0) (length 2.54) (name "1") (number "1"))))')
+    sym = sexpr.parse(src.format(kw="Resistors"))
+    assert symstyle.restyle_symbol(sym, "ansi")
+    text = sexpr.dump_inline(sym)
+    assert "rectangle" not in text and text.count("polyline") == 5 and text.count("(pin passive") == 2
+    assert '(number "1"' in text and '(number "2"' in text and '"R10K_1_1"' in text
+    assert symstyle.restyle_symbol(sym, "iec") and "rectangle" in sexpr.dump_inline(sym)
+    assert not symstyle.restyle_symbol(sexpr.parse(src.format(kw="Resistors")), "keep")
+    assert not symstyle.restyle_symbol(sexpr.parse(src.format(kw="NTC Thermistors")), "ansi")
+    assert not symstyle.restyle_symbol(sexpr.parse(src.replace('"Reference" "R"', '"Reference" "C"')), "ansi")
