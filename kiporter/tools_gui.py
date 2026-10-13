@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING, Callable
 
-from . import bom, kicad_control, library, libtools, providers, render, sexpr
+from . import alternatives, bom, kicad_control, library, libtools, providers, render, sexpr
 
 if TYPE_CHECKING:
     from .gui import App
@@ -685,7 +685,8 @@ class BomTab(ttk.Frame):
 
     def _setup_columns(self) -> None:
         src_cols = [(f"s{i}", f"{s} (stock | lead)", 140) for i, s in enumerate(self.sources)]
-        tail = [("best", "Best source", 140), ("status", "Status", 100)] if self.sources else []
+        tail = [("best", "Best source", 140), ("status", "Status", 100),
+                ("alt", "Suggested alternative", 420)] if self.sources else []
         cols = self.BASE_COLS + src_cols + tail
         self.tree["columns"] = [c[0] for c in cols]
         for cid, head, w in cols:
@@ -764,6 +765,8 @@ class BomTab(ttk.Frame):
                 tail = [best, {"ok": "✔ in stock", "low": "⚠ short", "none": "✖ none",
                                "no MPN": "no MPN", "dnp": "DNP"}.get(status, "")]
                 tag = {"ok": "ok", "low": "low", "none": "none", "no MPN": "nompn", "dnp": "dnp"}.get(status, "")
+                alt = alternatives.best(ln, self._need(ln)) if status in ("low", "none", "no MPN") else None
+                tail.append(alt.text() if alt else "")
             d = ln.data
             self.tree.insert("", "end", iid=str(self.lines.index(ln)), tags=(tag,) if tag else (), values=(
                 n, ln.refs_str, ln.qty, self._need(ln), ln.value + ("  (DNP)" if ln.dnp else ""), ln.footprint_name,
@@ -781,12 +784,26 @@ class BomTab(ttk.Frame):
         self._setup_columns()
         self._gen += 1
         gen = self._gen
-        todo = [l for l in self.lines if not l.dnp and (l.mpn or l.lcsc)]
+        # lines without a part number are still worth a look when they are plain R/C/L with a value
+        todo = [l for l in self.lines if not l.dnp and (l.mpn or l.lcsc or alternatives.keyword(l))]
         for ln in todo:
-            ln.offers = {s: None for s in self.sources}
+            ln.offers = {s: None for s in self.sources} if (ln.mpn or ln.lcsc) else {}
+            ln.alts = {}
         self._redraw()
         self.info.set(f"Checking {len(todo)} parts at {', '.join(self.sources)}…")
         remaining = [len(self.sources)]
+        needs = {id(ln): self._need(ln) for ln in todo}
+
+        def suggest(prov, ln, res, need, delay):
+            """Closest in-stock part at this supplier, for a line it cannot fill."""
+            alt = alternatives.family_pick(ln, res, need) if ln.mpn else None
+            if alt is None or (alt.part.stock or 0) < need:
+                kw = alternatives.keyword(ln)
+                if kw:
+                    time.sleep(delay)
+                    alt2 = alternatives.passive_pick(ln, prov.search(kw, limit=50), need)
+                    alt = alternatives._rank([a for a in (alt, alt2) if a], need)
+            return alt
 
         def worker(name: str):
             prov = self.app.providers[name]
@@ -797,16 +814,24 @@ class BomTab(ttk.Frame):
                 q = ln.mpn or ln.lcsc
                 if name == "LCSC" and ln.lcsc:
                     q = ln.lcsc
+                res, best = [], None
                 try:
-                    res = prov.search(q, limit=10)
-                    if q == ln.lcsc:
-                        best = next((r for r in res if r.supplier_pn == ln.lcsc), None)
-                    else:
-                        best = providers.best_match(res, q)
-                    ln.offers[name] = best or "not found"
+                    if q:
+                        res = prov.search(q, limit=10)
+                        if q == ln.lcsc:
+                            best = next((r for r in res if r.supplier_pn == ln.lcsc), None)
+                        else:
+                            best = providers.best_match(res, q)
+                        ln.offers[name] = best or "not found"
                 except Exception as e:  # noqa: BLE001
                     ln.offers[name] = "error"
                     self.app.tlog(f"BOM check {name} {q}: {e}")
+                need = needs[id(ln)]
+                if not best or (best.stock or 0) < need:
+                    try:
+                        ln.alts[name] = suggest(prov, ln, res, need, delay)
+                    except Exception as e:  # noqa: BLE001
+                        self.app.tlog(f"BOM alternative {name} {ln.refs_str}: {e}")
                 self.app.post(self._redraw)
                 time.sleep(delay)
             self.app.post(finish)
@@ -816,8 +841,11 @@ class BomTab(ttk.Frame):
             if remaining[0] == 0 and gen == self._gen:
                 self._redraw()
                 states = [self._best(l)[1] for l in self.lines if not l.dnp]
+                found = sum(1 for l in self.lines if not l.dnp and self._best(l)[1] != "ok"
+                            and alternatives.best(l, self._need(l)))
                 self.info.set(f"Done: {states.count('ok')} in stock, {states.count('low')} short, "
-                              f"{states.count('none')} unavailable, {states.count('no MPN')} without MPN.")
+                              f"{states.count('none')} unavailable, {states.count('no MPN')} without MPN. "
+                              f"{found} alternatives suggested - check them before ordering.")
                 self.app.settings.save()
         for name in self.sources:
             threading.Thread(target=worker, args=(name,), daemon=True).start()

@@ -31,6 +31,7 @@ class BomLine:
     data: dict = field(default_factory=dict)  # canonical field data (mpn, manufacturer, lcsc, digikey, ...)
     mount: str = ""  # SMD | THT | Mixed
     offers: dict = field(default_factory=dict)  # supplier -> PartResult | str
+    alts: dict = field(default_factory=dict)  # supplier -> alternatives.Alternative | None
 
     @property
     def mpn(self) -> str:
@@ -360,19 +361,45 @@ def export(lines: list[BomLine], fmt: BomFormat, out_dir: Path, base: str, board
     return written
 
 
+def stock_status(ln: BomLine, need: int) -> str:
+    """ok | low | none | no MPN | '' (not checked) for a line, given how many parts are needed."""
+    if not (ln.mpn or ln.lcsc):
+        return "no MPN"
+    if not ln.offers:
+        return ""
+    stocks = [o.stock or 0 for o in ln.offers.values() if o is not None and not isinstance(o, str)]
+    if any(st >= need for st in stocks):
+        return "ok"
+    return "low" if any(stocks) else "none"
+
+
 def write_stock_report(lines: list[BomLine], sources: list[str], boards: int, path: Path) -> Path:
-    head = ["References", "Qty/board", f"Qty x{boards}", "Value", "Footprint", "MPN", "Manufacturer"]
+    from . import alternatives
+    head = ["References", "Qty/board", f"Qty x{boards}", "Value", "Footprint", "MPN", "Manufacturer", "Status"]
     for s in sources:
         head += [f"{s} PN", f"{s} stock", f"{s} lead", f"{s} price"]
+    head += ["Suggested alternative", "Alt. supplier", "Alt. supplier PN", "Alt. manufacturer", "Alt. stock",
+             "Alt. price", "Why it was suggested"]
+    labels = {"ok": "in stock", "low": "short", "none": "unavailable", "no MPN": "no MPN"}
     rows = [head]
     for ln in lines:
-        row = [ln.refs_str, ln.qty, ln.qty * boards, ln.value, ln.footprint_name, ln.mpn, ln.manufacturer]
+        need = ln.qty * boards
+        status = stock_status(ln, need)
+        row = [ln.refs_str, ln.qty, need, ln.value, ln.footprint_name, ln.mpn, ln.manufacturer,
+               labels.get(status, "")]
         for s in sources:
             o = ln.offers.get(s)
             if o is not None and not isinstance(o, str):
                 row += [o.supplier_pn, o.stock if o.stock is not None else "", o.lead_str, o.price_str]
             else:
                 row += [o or "", "", "", ""]
+        alt = alternatives.best(ln, need) if status != "ok" else None
+        if alt:
+            p = alt.part
+            row += [p.mpn, p.source, p.supplier_pn, p.manufacturer, p.stock if p.stock is not None else "",
+                    p.price_str, alt.reason]
+        else:
+            row += [""] * 7
         rows.append(row)
     return write_table(rows, path, "Stock")
 

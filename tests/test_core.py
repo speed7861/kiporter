@@ -248,3 +248,33 @@ def test_lib_table_wrong_header_is_repaired(tmp_path):
     t.write_text("(sym_lib_table\n)\n", encoding="utf-8")
     assert kicad_env.fix_lib_table_header(t, "fp")
     assert t.read_text(encoding="utf-8") == "(fp_lib_table\n\t(version 7)\n)\n"
+
+
+def test_bom_alternatives():
+    from kiporter import alternatives as alt
+    from kiporter.bom import BomLine
+    from kiporter.providers import PartResult
+    assert alt.schematic_value("4k7", "resistor") == 4700 and alt.schematic_value("100R", "resistor") == 100
+    assert alt.schematic_value("10k 1%", "resistor") == 10000 and alt.schematic_value("0603WAF1002T5E", "resistor") is None
+    assert abs(alt.schematic_value("100n", "capacitor") - 1e-7) < 1e-12 and alt.schematic_value("100", "capacitor") is None
+    assert abs(alt.schematic_value("4u7", "capacitor") - 4.7e-6) < 1e-12
+    assert alt.values_in("Thick Film Resistors - SMD 10 kOhms 1%", "resistor") == [10000.0]
+    assert abs(alt.values_in("MLCC 0.1uF 50V X7R", "capacitor")[0] - 1e-7) < 1e-12
+    assert alt.kind_of(["R1", "R22"]) == "resistor" and alt.kind_of(["RN1"]) is None and alt.kind_of(["R1", "C1"]) is None
+
+    ln = BomLine(refs=["R1", "R2"], qty=2, value="10k", footprint="Resistor_SMD:R_0603_1608Metric")
+    assert alt.keyword(ln) == "10k 0603 resistor"
+    hits = [PartResult(source="LCSC", mpn="A", description="10kΩ ±1% 100mW", package="0603", stock=500, price=0.01),
+            PartResult(source="LCSC", mpn="B", description="10kΩ ±1% 125mW", package="0805", stock=9000),
+            PartResult(source="LCSC", mpn="C", description="1kΩ ±1% 100mW", package="0603", stock=9000),
+            PartResult(source="LCSC", mpn="D", description="10kΩ ±5% 100mW", package="0603", stock=0)]
+    assert alt.passive_pick(ln, hits, 10).part.mpn == "A"
+
+    ic = BomLine(refs=["U1"], qty=1, value="LM358", footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+                 data={"mpn": "LM358DR"})
+    fam = [PartResult(source="Mouser", mpn="LM358DR", stock=0),
+           PartResult(source="Mouser", mpn="LM358DR2G", package="SOIC-8", stock=700),
+           PartResult(source="Mouser", mpn="LM358PWR", package="TSSOP-8", stock=9000),
+           PartResult(source="Mouser", mpn="LM324DR", package="SOIC-14", stock=9000)]
+    assert alt.family_pick(ic, fam, 5).part.mpn == "LM358DR2G"
+    assert alt.keyword(ic) is None
