@@ -861,15 +861,15 @@ class BomExportDialog(_ToolDialog):
         self.tab = tab
         s = app.settings
         p = app.current_project()
-        self.templates = bom.kicad_templates(p.pro_file, app.ki) if p else []
-        self.kfmts = bom.kicad_formats(p.pro_file) if p else dict(bom.KICAD_BUILTIN_FORMATS)
+        self.templates = bom.kicad_templates(p.pro_file, app.ki, s) if p else []
+        self.kfmts = bom.kicad_formats(p.pro_file, app.ki) if p else dict(bom.KICAD_BUILTIN_FORMATS)
         self._preview_gen = 0
         b = self.body
         row = ttk.Frame(b)
         row.pack(fill="x")
         ttk.Label(row, text="Format:").pack(side="left")
-        names = bom.FORMAT_NAMES + [t.name for t in self.templates]
-        self.fmt = ttk.Combobox(row, state="readonly", width=48, values=names, height=25)
+        names = self._names()
+        self.fmt = ttk.Combobox(row, state="readonly", width=60, values=names, height=30)
         self.fmt.set(s.bom_format if s.bom_format in names else bom.FORMAT_NAMES[0])
         self.fmt.pack(side="left", padx=6)
         self.fmt.bind("<<ComboboxSelected>>", lambda e: self._update())
@@ -919,6 +919,31 @@ class BomExportDialog(_ToolDialog):
         self._update()
 
     # ---------------------------------------------------------------- helpers
+    def _names(self) -> list[str]:
+        mine = [t.name for t in self.templates if bom.USER_MARK in t.name]
+        rest = [t.name for t in self.templates if bom.USER_MARK not in t.name]
+        return mine + bom.FORMAT_NAMES + rest + [bom.ADD_SCRIPT]
+
+    def _reload_templates(self, select: str | None = None) -> None:
+        p = self.app.current_project()
+        self.templates = bom.kicad_templates(p.pro_file, self.app.ki, self.app.settings) if p else []
+        self.fmt["values"] = self._names()
+        if select:
+            self.fmt.set(next((n for n in self._names() if select in n), self._names()[0]))
+
+    def _choose_script(self, name: str | None) -> None:
+        """Locate a missing user BOM plugin, or add a new one; remembered in the settings."""
+        f = filedialog.askopenfilename(parent=self, title="Choose the BOM plugin script (.py)",
+                                       filetypes=[("Python script", "*.py")])
+        if not f:
+            self.fmt.set(bom.FORMAT_NAMES[0])
+            return
+        key = name or Path(f).stem
+        self.app.settings.bom_plugin_paths[key] = f
+        self.app.settings.save()
+        self.app.log(f"BOM plugin '{key}' → {f}")
+        self._reload_templates(select=f"{key} (your BOM plugin)")
+
     def _template(self) -> bom.KicadTemplate | None:
         return next((t for t in self.templates if t.name == self.fmt.get()), None)
 
@@ -955,12 +980,19 @@ class BomExportDialog(_ToolDialog):
             self.prev.insert("", "end", values=list(r))
 
     def _update(self) -> None:
+        if self.fmt.get() == bom.ADD_SCRIPT:
+            self._choose_script(None)
         t = self._template()
+        if t is not None and t.source == "missing":
+            name = t.name[len(bom.KICAD_PREFIX) + len(bom.USER_MARK):].split(" (BOM plugin")[0]
+            self._choose_script(name)
+            t = self._template()
         self._relayout(t is not None)
         if t:
             self.dnp_check.state(["disabled"])
-            what = {"project": "your project's KiCad BOM settings", "built-in": "a KiCad built-in preset",
-                    "user": "a BOM plugin configured in KiCad", "kicad": "a BOM plugin script shipped with KiCad"}
+            what = {"project": "BOM settings / a preset saved in your KiCad project", "built-in": "a KiCad built-in preset",
+                    "user": f"your own BOM plugin script ({t.command[0] if t.command else ''})",
+                    "kicad": "a BOM plugin script shipped with KiCad"}
             self.notes.set(f"Uses {what.get(t.source, 'KiCad')} - the same output KiCad's BOM tools produce. "
                            + ("Grouping, fields and DNP handling come from the preset." if t.kind == "preset" else
                               "The script runs on a netlist exported with kicad-cli."))

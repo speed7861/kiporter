@@ -66,6 +66,7 @@ configuration.
   Aisler, MacroFab, with pick-and-place/CPL files.
 - **Export for distributor BOM tools:** Digi-Key, Mouser and LCSC.
 - Exports as CSV or Excel.
+- **Your own BOM formats are listed first (marked with ★):** your project's KiCad BOM settings, BOM presets saved in any of your recent projects, and BOM plugin scripts you registered in any KiCad version or added in Kiporter. KiCad's built-in presets and the BOM scripts that ship with KiCad are listed after them. Each has a live preview. If a plugin's script has moved, pick its new location once and Kiporter remembers it.
 
 ### Fabrication
 One click creates a `<Project> Build` folder containing:
@@ -75,6 +76,8 @@ One click creates a `<Project> Build` folder containing:
 - an upload ZIP.
 
 Zones are refilled and DRC is run on a copy first, so your board file is never changed.
+
+If no preset fits, make a **custom Gerber setup**. You choose the layers, Gerber options (Protel extensions, X2, netlist attributes, soldermask subtraction, precision), drill options (format, units, zeros, origin, separate PTH/NPTH, drill map) and the BOM format. You can also use the plot settings saved in the board.
 
 ### Library Tools
 - **Clean up & auto-link:** links symbols to footprints and footprints to 3D models, repairs
@@ -108,7 +111,7 @@ and offers to connect suppliers.
 
 LCSC works immediately. Digi-Key, Mouser, Farnell/Newark, TME and Octopart each give out
 **free API keys**: you sign in with your normal account and create a key. Step-by-step
-directions are in **Settings → Suppliers** inside the app, and in
+directions are in **Settings → Suppliers** inside the app (paste the key and press **Enter**; suppliers without a key are shown in red as *not connected*), and in
 **[docs/API_KEYS.md](docs/API_KEYS.md)**. Keys are stored in your system's credential store
 (Windows Credential Manager, macOS Keychain or Linux Secret Service).
 

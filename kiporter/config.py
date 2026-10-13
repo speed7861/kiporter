@@ -120,6 +120,7 @@ class Settings:
     bom_export_cpl: bool = True
     fab_profile: str = "JLCPCB"
     custom_fab_profiles: list = field(default_factory=list)
+    bom_plugin_paths: dict = field(default_factory=dict)  # BOM plugin name -> script chosen by the user
     # ---- misc
     first_run_done: bool = False
     last_project: str = ""

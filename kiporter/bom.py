@@ -444,47 +444,128 @@ def _plugin_dirs(ki: KiCadInstall) -> list[Path]:
     return [d for d in dirs if d.is_dir()]
 
 
-def kicad_templates(project_file: Path, ki: KiCadInstall) -> list[KicadTemplate]:
-    """BOM templates KiCad knows about: project settings and presets, built-in presets, BOM plugin scripts."""
-    out: list[KicadTemplate] = []
+USER_MARK = "★ "  # user-made formats are listed first, with this mark
+ADD_SCRIPT = "➕  Add my own BOM plugin script…"
+
+
+def _user_plugin_dirs(ki: KiCadInstall) -> list[Path]:
+    """Folders where users keep their own KiCad scripts (Documents/KiCad/<ver>/...)."""
+    from .kicad_env import kicad_env_vars
+    roots = {Path.home() / "Documents" / "KiCad" / ki.version}
+    third = kicad_env_vars(ki).get(f"KICAD{ki.major}_3RD_PARTY")
+    if third:
+        roots.add(Path(third).parent)
+    dirs = []
+    for r in roots:
+        dirs += [r / "scripting" / "plugins", r / "plugins"]
+    return [d for d in dirs if d.is_dir()]
+
+
+def _looks_like_bom_script(p: Path) -> bool:
+    try:
+        head = p.read_text(encoding="utf-8", errors="ignore")[:6000]
+    except OSError:
+        return False
+    return "kicad_netlist_reader" in head or ("bom" in p.stem.lower() and "%I" in head)
+
+
+def _recent_projects(ki: KiCadInstall) -> list[Path]:
+    sysd = _read_json(ki.config_dir / "kicad.json").get("system", {})
+    return [Path(p) for p in dict.fromkeys((sysd.get("open_projects") or []) + (sysd.get("file_history") or []))]
+
+
+def kicad_templates(project_file: Path, ki: KiCadInstall, settings: Settings | None = None) -> list[KicadTemplate]:
+    """Every BOM template Kiporter can find. User-made ones first:
+    BOM settings/presets of this and your recent projects, BOM plugin scripts you registered in any
+    KiCad version (or added in Kiporter), scripts in your KiCad user folders. Then KiCad's built-in
+    presets and the BOM plugin scripts shipped with KiCad."""
+    from .kicad_env import config_versions, kicad_config_root
+    user: list[KicadTemplate] = []
+    seen_presets: set[tuple] = set()
+
+    def add_preset(label: str, p: dict, source: str) -> None:
+        t = _from_preset(label, p, source)
+        if t:
+            key = (tuple(t.fields), tuple(t.group_by))
+            if key not in seen_presets:
+                seen_presets.add(key)
+                t.name = KICAD_PREFIX + USER_MARK + t.name[len(KICAD_PREFIX):]
+                user.append(t)
+
     sch = _read_json(project_file).get("schematic", {})
     if sch.get("bom_settings"):
-        t = _from_preset("Project BOM settings (as set up in KiCad)", sch["bom_settings"], "project")
-        if t:
-            out.append(t)
+        add_preset("Project BOM settings (as set up in KiCad)", sch["bom_settings"], "project")
     for p in sch.get("bom_presets") or []:
-        t = _from_preset(f"{p.get('name', 'Preset')} (project preset)", p, "project")
-        if t:
-            out.append(t)
+        add_preset(f"{p.get('name', 'Preset')} (preset in this project)", p, "project")
+    for other in _recent_projects(ki):
+        if other == project_file or not other.exists():
+            continue
+        osch = _read_json(other).get("schematic", {})
+        for p in osch.get("bom_presets") or []:
+            add_preset(f"{p.get('name', 'Preset')} (preset from {other.stem})", p, "project")
+
+    # ---- BOM plugin scripts
+    shipped = {s.name.lower(): s for d in _plugin_dirs(ki) for s in d.glob("*.py")}
+    user_dirs = _user_plugin_dirs(ki)
+    mine = {s.name.lower(): s for d in user_dirs for s in d.glob("*.py")}
+    chosen = dict(settings.bom_plugin_paths) if settings else {}
+    seen_scripts: set[str] = set()
+
+    def add_plugin(name: str, script: Path | None, ext: str, source: str) -> None:
+        key = name.lower()
+        if key in seen_scripts:
+            return
+        seen_scripts.add(key)
+        if script is None or not script.exists():
+            user.append(KicadTemplate(f"{KICAD_PREFIX}{USER_MARK}{name} (BOM plugin - script not found, click to "
+                                      "locate it)", "plugin", command=["", ext], source="missing"))
+        else:
+            user.append(KicadTemplate(f"{KICAD_PREFIX}{USER_MARK}{name} (your BOM plugin)", "plugin",
+                                      command=[str(script), ext], source="user"))
+
+    for name, path in chosen.items():
+        add_plugin(name, Path(path), ".csv", "user")
+    cfgs = [kicad_config_root() / v / "eeschema.json" for v in reversed(config_versions())]
+    for cfg in [ki.config_dir / "eeschema.json"] + cfgs:
+        for plugin in (_read_json(cfg).get("bom", {}) or {}).get("plugins") or []:
+            cmd = plugin.get("command", "")
+            m = re.search(r'["\']?([^"\']+\.py)["\']?', cmd)
+            if not m:
+                continue
+            script = Path(m.group(1))
+            ext = re.search(r"%O(\.\w+)", cmd)
+            name = plugin.get("name") or script.stem
+            if script.name.lower() in shipped and not chosen.get(name):
+                continue  # one of KiCad's own scripts - listed below
+            found = script if script.exists() else mine.get(script.name.lower())
+            add_plugin(name, found, ext.group(1) if ext else ".csv", "user")
+    for s in sorted(mine.values()):
+        if s.name.lower() not in shipped and _looks_like_bom_script(s):
+            add_plugin(s.stem, s, ".csv", "user")
+
+    out = list(user)
     for name, (flds, groups) in KICAD_BUILTIN_PRESETS.items():
         out.append(KicadTemplate(KICAD_PREFIX + name, "preset", list(flds), [KICAD_LABELS.get(f, f) for f in flds],
                                  list(groups), source="built-in"))
-    seen: set[str] = set()
-    for plugin in (_read_json(ki.config_dir / "eeschema.json").get("bom", {}) or {}).get("plugins") or []:
-        m = re.search(r'["\']?([^"\']+\.py)["\']?', plugin.get("command", ""))
-        ext = re.search(r"%O(\.\w+)", plugin.get("command", ""))
-        if m and Path(m.group(1)).exists() and Path(m.group(1)).name not in seen:
-            seen.add(Path(m.group(1)).name)
-            out.append(KicadTemplate(f"{KICAD_PREFIX}{plugin.get('name') or Path(m.group(1)).stem} (BOM plugin)",
-                                     "plugin", command=[m.group(1), ext.group(1) if ext else ".csv"], source="user"))
-    for d in _plugin_dirs(ki):
-        for script in sorted(d.glob("bom*.py")):
-            if script.name in seen:
-                continue
-            seen.add(script.name)
+    for script in sorted(shipped.values()):
+        if script.stem.lower().startswith("bom"):
             ext = ".html" if "html" in script.stem else ".txt" if "txt" in script.stem else ".csv"
-            out.append(KicadTemplate(f"{KICAD_PREFIX}{script.stem} (BOM plugin)", "plugin",
+            out.append(KicadTemplate(f"{KICAD_PREFIX}{script.stem} (BOM plugin shipped with KiCad)", "plugin",
                                      command=[str(script), ext], source="kicad"))
     return out
 
 
-def kicad_formats(project_file: Path) -> dict[str, dict]:
+def kicad_formats(project_file: Path, ki: KiCadInstall | None = None) -> dict[str, dict]:
     sch = _read_json(project_file).get("schematic", {})
     fmts = dict(KICAD_BUILTIN_FORMATS)
     if sch.get("bom_fmt_settings"):
         fmts["Project format (as set up in KiCad)"] = sch["bom_fmt_settings"]
     for p in sch.get("bom_fmt_presets") or []:
-        fmts[f"{p.get('name', 'Format')} (project preset)"] = p
+        fmts[f"{p.get('name', 'Format')} (preset in this project)"] = p
+    for other in (_recent_projects(ki) if ki else []):
+        if other != project_file and other.exists():
+            for p in _read_json(other).get("schematic", {}).get("bom_fmt_presets") or []:
+                fmts.setdefault(f"{p.get('name', 'Format')} (preset from {other.stem})", p)
     return fmts
 
 
@@ -503,6 +584,8 @@ def export_kicad_template(t: KicadTemplate, project_file: Path, ki: KiCadInstall
     tag = re.sub(r"[^A-Za-z0-9]+", "_", t.name[len(KICAD_PREFIX):]).strip("_")
     if t.kind == "plugin":
         script, ext = t.command
+        if not script or not Path(script).exists():
+            raise RuntimeError("The BOM plugin script was not found - select it to locate the .py file.")
         with tempfile.TemporaryDirectory() as td:
             xml = Path(td) / "netlist.xml"
             r = subprocess.run(ki.cli_cmd("sch", "export", "python-bom", sch, "-o", xml), capture_output=True,
@@ -510,8 +593,12 @@ def export_kicad_template(t: KicadTemplate, project_file: Path, ki: KiCadInstall
             if not xml.exists():
                 raise RuntimeError(f"kicad-cli netlist export failed: {(r.stderr or r.stdout).strip()}")
             out = out_dir / f"{base}_BOM_{tag}{ext}"
+            import os
+            env = dict(os.environ)
+            env["PYTHONPATH"] = os.pathsep.join([str(Path(script).parent)] + [str(d) for d in _plugin_dirs(ki)]
+                                                + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
             r = subprocess.run([_python_exe(), script, str(xml), str(out)], capture_output=True, text=True,
-                               timeout=300, creationflags=NO_WINDOW, cwd=str(Path(script).parent))
+                               timeout=300, creationflags=NO_WINDOW, cwd=str(Path(script).parent), env=env)
         made = [p for p in out_dir.glob(f"{base}_BOM_{tag}*") if p.is_file()]
         if not made:
             raise RuntimeError(f"BOM plugin produced no file: {(r.stderr or r.stdout).strip()[:400]}")

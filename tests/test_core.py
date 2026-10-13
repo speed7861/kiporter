@@ -189,6 +189,19 @@ def test_kicad_bom_templates_from_project(tmp_path):
         "bom_fmt_presets": [{"name": "Pipes", "field_delimiter": "|"}]}}), encoding="utf-8")
     ki = kicad_env.KiCadInstall("10.0", tmp_path)
     names = [t.name for t in bom.kicad_templates(pro, ki)]
-    assert names[0].startswith(bom.KICAD_PREFIX + "Project BOM settings")
+    assert names[0].startswith(bom.KICAD_PREFIX + bom.USER_MARK + "Project BOM settings")
     assert any("Mine" in n for n in names) and any("Grouped By Value" in n for n in names)
-    assert "Pipes (project preset)" in bom.kicad_formats(pro)
+    assert "Pipes (preset in this project)" in bom.kicad_formats(pro)
+
+
+def test_user_bom_plugin_is_listed_first(tmp_path):
+    from kiporter import bom, kicad_env
+    from kiporter.config import Settings
+    script = tmp_path / "My_BOM.py"
+    script.write_text("import kicad_netlist_reader\n", encoding="utf-8")
+    pro = tmp_path / "p.kicad_pro"
+    pro.write_text("{}", encoding="utf-8")
+    s = Settings()
+    s.bom_plugin_paths = {"My_BOM": str(script)}
+    ts = bom.kicad_templates(pro, kicad_env.KiCadInstall("10.0", tmp_path), s)
+    assert bom.USER_MARK in ts[0].name and ts[0].source == "user" and ts[0].command[0] == str(script)
