@@ -47,7 +47,7 @@ class App(tk.Tk):
         ui.setup(self, self.settings)
         self.ki = kicad_env.detect_kicad(self.settings.kicad_version, self.settings.kicad_cli_path)
         self.providers = providers.make_providers(self.settings)
-        self.cad_pool = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        self.cad_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)  # EasyEDA: one request at a time
 
         self.projects: list[kicad_env.ProjectInfo] = []
         self.results: dict[str, PartResult] = {}
@@ -55,6 +55,7 @@ class App(tk.Tk):
         self.global_libs: list[library.LibraryTarget] = []
         self._ui_q: queue.Queue = queue.Queue()
         self._search_gen = 0
+        self._cad_queued: set[str] = set()
         self._pending_jobs = 0
         self._ipc_version = ""
         self._sort_col, self._sort_desc = "stock", True
@@ -622,6 +623,7 @@ class App(tk.Tk):
             return
         self._search_gen += 1
         gen = self._search_gen
+        self._cad_queued.clear()
         self.tree.delete(*self.tree.get_children())
         self.results.clear()
         self.preview.clear()
@@ -643,10 +645,12 @@ class App(tk.Tk):
     def _update_count_status(self) -> None:
         shown = len(self.tree.get_children())
         in_stock = sum(1 for r in self.results.values() if r.stock)
-        pending = sum(1 for r in self.results.values() if r.cad is None) if self.settings.check_cad else 0
+        pending = len(self._cad_queued)
         msg = f"{shown} of {len(self.results)} results shown ({in_stock} in stock)"
-        if pending:
-            msg += f" • checking CAD models for {pending}…"
+        if cad.blocked_for():
+            msg += " • EasyEDA is blocking CAD lookups for a few minutes (cached parts still work)"
+        elif pending:
+            msg += f" • checking CAD models ({pending} left)…"
         self.set_status(msg + " — double-click a part to import it")
 
     def _add_results(self, gen: int, name: str, res: list[PartResult]) -> None:
@@ -658,9 +662,10 @@ class App(tk.Tk):
             iid = f"r{len(self.results)}"
             self.results[iid] = r
             tags = (r.source,) if r.stock else (r.source, "nostock")
+            cad.fill_known(r)  # from the cache - no network
             self.tree.insert("", "end", iid=iid, tags=tags, values=self._row_values(r))
-            if self.settings.check_cad:
-                self.cad_pool.submit(self._check_cad, gen, iid, r)
+        if self.settings.check_cad_all or self.settings.cad_filter != "any":
+            self._queue_cad_checks()
         self._apply_sort()
         self._autosize_columns()
         self.log(f"{name}: {len(res)} results")
@@ -671,17 +676,29 @@ class App(tk.Tk):
         return (r.source, r.mpn, r.manufacturer, r.package, cad.label(r), r.stock_str, r.lead_str, r.price_str,
                 r.moq if r.moq is not None else "", r.supplier_pn, r.description)
 
+    def _queue_cad_checks(self) -> None:
+        """Look up CAD availability (one EasyEDA request per part, one at a time) for unknown rows."""
+        gen = self._search_gen
+        for iid, r in self.results.items():
+            if r.cad is None and iid not in self._cad_queued:
+                self._cad_queued.add(iid)
+                self.cad_pool.submit(self._check_cad, gen, iid, r)
+        self._update_count_status()
+
     def _check_cad(self, gen: int, iid: str, r: PartResult) -> None:
         if gen != self._search_gen:
             return
-        try:
-            cad.check(r)
-        except Exception as e:  # noqa: BLE001
-            r.cad = cad.NONE
-            self.tlog(f"CAD check {r.mpn}: {e}")
+        if not cad.blocked_for():
+            try:
+                cad.check(r)
+            except cad.EasyedaBlocked:
+                self.tlog("EasyEDA is blocking requests for a few minutes - CAD checks paused.")
+            except Exception as e:  # noqa: BLE001
+                self.tlog(f"CAD check {r.mpn}: {e}")
         self.post(self._cad_checked, gen, iid)
 
     def _cad_checked(self, gen: int, iid: str) -> None:
+        self._cad_queued.discard(iid)
         if gen != self._search_gen or iid not in self.results:
             return
         if self.tree.exists(iid):
@@ -714,6 +731,8 @@ class App(tk.Tk):
     def _cad_filter_changed(self) -> None:
         self.settings.cad_filter = CAD_FILTERS[max(self.cad_filter_combo.current(), 0)][0]
         self.settings.save()
+        if self.settings.cad_filter != "any":
+            self._queue_cad_checks()
         self._apply_sort()
         self._update_count_status()
 
@@ -803,6 +822,12 @@ class App(tk.Tk):
                 return
             lcsc, part = res
             self._preview_part = (token, lcsc, part)
+            cad.fill_known(r)  # the download also told us what CAD exists
+            iid = next((i for i, x in self.results.items() if x is r), None)
+            if iid and self.tree.exists(iid):
+                self.tree.set(iid, "cad", cad.label(r))
+                self.tree.set(iid, "package", r.package)
+            self._show_details(r)
             try:
                 lib = sexpr.parse(part.symbol_files[0].read_text(encoding="utf-8")) if part.symbol_files else None
                 names = render.symbol_names(lib) if lib else []
@@ -817,14 +842,11 @@ class App(tk.Tk):
         def fail(e):
             if token != self._preview_token:
                 return
-            if attempt == 0 and "limits how fast" in str(e):  # EasyEDA busy: try once more by itself
-                self.preview.set_symbol(None, None, "EasyEDA is busy - retrying…")
-                self.preview.set_footprint(None, "EasyEDA is busy - retrying…")
-                self.after(3000, lambda: self._load_preview(token, r, attempt=1))
-                return
-            self.preview.set_symbol(None, None, f"Preview failed: {e}")
-            self.preview.set_footprint(None, f"Preview failed: {e}")
-            self.preview.set_3d(None, f"Preview failed: {e}")
+            msg = str(e) if isinstance(e, (cad.EasyedaBlocked, RuntimeError)) else f"Preview failed: {e}"
+            self.preview.set_symbol(None, None, msg)
+            self.preview.set_footprint(None, msg)
+            self.preview.set_3d(None, msg)
+            self._update_count_status()
         self.run_bg(work, done, fail)
 
     def _render_3d(self) -> None:
