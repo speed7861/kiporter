@@ -32,7 +32,7 @@ class BomLine:
     mount: str = ""  # SMD | THT | Mixed
     offers: dict = field(default_factory=dict)  # supplier -> PartResult | str
     alts: dict = field(default_factory=dict)  # "LCSC" -> alternatives.Alternative | None
-    original: tuple | None = None  # (data, offers) from before switching to a suggested part
+    original: tuple | None = None  # (data, offers, value) from before switching to a suggested part
 
     @property
     def mpn(self) -> str:

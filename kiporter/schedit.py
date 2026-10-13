@@ -47,7 +47,10 @@ def symbol_refs(sym: list) -> set[str]:
 
 
 def _set_field(sym: list, key: str, value: str, names: dict[str, str]) -> bool:
-    """Set the field for a canonical key, reusing whatever spelling the symbol already has."""
+    """Set the field for a canonical key, reusing whatever spelling the symbol already has.
+    The key "value" is the symbol's Value."""
+    if key == "value":
+        return fields.set_property(sym, "Value", value)
     known = [n.lower() for n in dict.fromkeys([names[key]] + fields.ALIASES[key])]
     props = [p for p in sexpr.children(sym, "property") if len(p) > 2]
     for p in props:

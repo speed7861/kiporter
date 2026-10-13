@@ -253,10 +253,14 @@ def suggest(ln, results: list[PartResult], need: int, search=None) -> Alternativ
 def switch(ln, alt: Alternative) -> None:
     """Make the suggested LCSC part the line's part (kept in ln.original so it can be undone)."""
     if ln.original is None:
-        ln.original = (dict(ln.data), dict(ln.offers))
+        ln.original = (dict(ln.data), dict(ln.offers), ln.value)
     p = alt.part
+    # a Value that is itself the old part number (MMBT2222A) follows the part; a real value (10k) stays
+    value_is_number = bool(value_part_number(ln)) or (bool(ln.mpn) and _norm_mpn(ln.value) == _norm_mpn(ln.mpn))
     ln.data["lcsc"] = p.supplier_pn
     if not alt.exact:  # a different part: its own number and maker go into the BOM
+        if value_is_number:
+            ln.value = p.mpn
         ln.data["mpn"] = p.mpn
         if p.manufacturer:
             ln.data["manufacturer"] = p.manufacturer
@@ -267,7 +271,7 @@ def switch(ln, alt: Alternative) -> None:
 def switch_back(ln) -> bool:
     if ln.original is None:
         return False
-    ln.data, ln.offers = ln.original
+    ln.data, ln.offers, ln.value = ln.original
     ln.original = None
     return True
 

@@ -329,7 +329,8 @@ def test_bom_value_used_as_part_number():
     q.offers = {"LCSC": a.part}
     assert stock_status(q, 6) == "ok"
     alt.switch(q, a)
-    assert q.lcsc == "C82460" and q.mpn == "MMBT2222ALT1G"
+    assert q.lcsc == "C82460" and q.mpn == "MMBT2222ALT1G" and q.value == "MMBT2222ALT1G"
+    assert alt.switch_back(q) and q.value == "MMBT2222A" and q.lcsc == ""
 
 
 def test_schematic_fields_are_written_in_place(tmp_path):
@@ -351,12 +352,13 @@ def test_schematic_fields_are_written_in_place(tmp_path):
     (tmp_path / "root.kicad_sch").write_text(root, encoding="utf-8")
     (tmp_path / "sub.kicad_sch").write_text(sub_sheet, encoding="utf-8")
     names = fields.field_names()
-    upd = {"Q8": {"lcsc": "C82460", "mpn": "MMBT2222ALT1G"}, "R1": {"lcsc": "C25804"}}
+    upd = {"Q8": {"lcsc": "C82460", "mpn": "MMBT2222ALT1G", "value": "MMBT2222ALT1G"}, "R1": {"lcsc": "C25804"}}
     count, files, texts = schedit.set_fields(tmp_path / "root.kicad_sch", upd, names)
     assert count == 2 and len(files) == 2
     schedit.write(texts)
     sub_text = (tmp_path / "sub.kicad_sch").read_text(encoding="utf-8")
     assert '(property "LCSC" "C82460"' in sub_text and '"MPN" "MMBT2222ALT1G"' in sub_text  # alias reused, MPN added
+    assert '(property "Value" "MMBT2222ALT1G"' in sub_text and "MMBT2222A\"" not in sub_text
     root_text = (tmp_path / "root.kicad_sch").read_text(encoding="utf-8")
     assert '"LCSC Part" "C25804"' in root_text and '(symbol "Device:R"' in root_text
     assert root_text.count("C25804") == 1  # the library copy of the symbol is left alone

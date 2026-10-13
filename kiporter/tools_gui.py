@@ -939,6 +939,8 @@ class BomTab(ttk.Frame):
             data = {"lcsc": ln.lcsc}
             if ln.mpn != old.get("mpn", ""):  # a different part: its number and maker go in too
                 data.update(mpn=ln.mpn, manufacturer=ln.manufacturer)
+            if ln.value != ln.original[2]:  # the Value was the old part number
+                data["value"] = ln.value
             for ref in ln.refs:
                 updates[ref] = data
         sch = p.pro_file.with_suffix(".kicad_sch")
@@ -956,6 +958,8 @@ class BomTab(ttk.Frame):
                            f"schematic?\n\nOnly the fields change ({names['lcsc']}"
                            + (f", {names['mpn']}, {names['manufacturer']}" if any(len(u) > 1 for u in updates.values())
                               else "")
+                           + (", and the Value where it was the old part number"
+                              if any("value" in u for u in updates.values()) else "")
                            + "). No symbol or footprint is replaced or moved.\n\n"
                            f"Files: {', '.join(f.name for f in files)}\nA backup is saved first."):
             return
