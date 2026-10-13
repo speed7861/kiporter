@@ -878,8 +878,10 @@ class BomTab(ttk.Frame):
                     tail.append(f"✔ LCSC number added ({ln.lcsc})" if old.get("mpn") == ln.mpn and not old.get("lcsc")
                                 else "✔ switched from " + (old.get("mpn") or old.get("lcsc") or "no part number"))
                 else:
-                    alt = None if ln.dnp else alternatives.best(ln, self._need(ln))
+                    alt = None if ln.dnp else alternatives.best(ln, self._need(ln), warnings=True)
                     tail.append(alt.text() if alt else "")
+                    if alt and "the Value says" in alt.reason:
+                        tag = "low"  # the part number does not match the Value: needs attention
             d = ln.data
             self.tree.insert("", "end", iid=str(self.lines.index(ln)), tags=(tag,) if tag else (), values=(
                 n, ln.refs_str, ln.qty, self._need(ln), ln.value + ("  (DNP)" if ln.dnp else ""), ln.footprint_name,
@@ -966,11 +968,15 @@ class BomTab(ttk.Frame):
                 self._redraw()
                 states = [self._best(l)[1] for l in self.lines if not l.dnp]
                 alts = [a for a in (alternatives.best(l, self._need(l)) for l in self.lines if not l.dnp) if a]
+                wrong = sum(1 for l in self.lines if not l.dnp and (a := alternatives.best(l, self._need(l), True))
+                            and "the Value says" in a.reason)
                 same = sum(1 for a in alts if a.exact)
                 self.info.set(f"Done: {states.count('ok')} in stock, {states.count('low')} short, "
                               f"{states.count('none')} unavailable, {states.count('no MPN')} without MPN. "
                               f"{len(alts)} LCSC parts suggested ({same} the same part, {len(alts) - same} similar "
-                              "- check those). Select lines and press 'Use suggested LCSC part'.")
+                              "- check those). Select lines and press 'Use suggested LCSC part'."
+                              + (f" ⚠ {wrong} line(s) have a part number that does not match their Value."
+                                 if wrong else ""))
                 self.app.settings.save()
         for name in passes:
             threading.Thread(target=worker, args=(name,), daemon=True).start()

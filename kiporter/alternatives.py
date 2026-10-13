@@ -20,6 +20,7 @@ from .providers import PartResult, _norm_mpn, guess_package, tidy_description
 
 KINDS = {"R": "resistor", "C": "capacitor", "L": "inductor"}
 SAME_PART = 10.0  # score of a suggestion that is the very same manufacturer part number
+MISMATCH_ONLY = -1.0  # not a suggestion: only a warning that the line's Value and part number disagree
 _MULT = {"": 1.0, "r": 1.0, "p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "μ": 1e-6, "m": 1e-3,
          "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
 _NUM = r"(\d+(?:\.\d+)?)"
@@ -44,12 +45,18 @@ class Alternative:
 
     def text(self) -> str:
         p = self.part
+        if self.warning_only:
+            return self.reason
         bits = [b for b in (p.stock_str and f"{p.stock_str} in stock", p.price_str) if b]
         return f"{p.supplier_pn}  {p.mpn}" + (f" ({', '.join(bits)})" if bits else "") + f" - {self.reason}"
 
     @property
     def exact(self) -> bool:
         return self.score >= SAME_PART
+
+    @property
+    def warning_only(self) -> bool:
+        return self.score == MISMATCH_ONLY
 
 
 _PART_NUMBER = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9][A-Za-z0-9\-/.,#+]{4,}$")
@@ -310,6 +317,38 @@ def _replacement(ln, results: list[PartResult], need: int, search, ref: PartResu
     return found
 
 
+def value_mismatch(ln, part: PartResult | None) -> tuple[float, float] | None:
+    """(schematic value, the part's value) when a resistor / capacitor / inductor line's Value and its
+    part number disagree - e.g. Value 1K on a line whose part number is a 10 k resistor."""
+    kind = kind_of(ln.refs)
+    if not kind or part is None:
+        return None
+    want = schematic_value(ln.value, kind)
+    have = values_in(str(part.extra.get("Attributes", "")), kind) or values_in(part.description, kind)
+    if want is None or not have or any(_close(want, x) for x in have):
+        return None
+    return want, have[0]
+
+
+def _for_value(ln, part: PartResult, need: int, search) -> Alternative | None:
+    """The part does not have the line's Value: find one that does (same package, same maker if possible)."""
+    kind = kind_of(ln.refs)
+    want, have = value_mismatch(ln, part)
+    note = (f"{part.mpn} is {format_value(have, kind)}, but the Value says {format_value(want, kind)}")
+    kw = keyword(ln)
+    hits = list(search(kw)) if kw and search is not None else []
+    # the wrong part's value must not be searched for, but its tolerance and maker are still a guide
+    ghost = PartResult(source=part.source, mpn="", manufacturer=part.manufacturer, package=part.package,
+                       extra={"Attributes": "; ".join(x for x in str(part.extra.get("Attributes", "")).split("; ")
+                                                      if not re.match(r"(Resistance|Capacitance|Inductance):", x))})
+    found = passive_pick(ln, hits, need, ghost)
+    if found is None:
+        return Alternative(part, f"⚠ {note}; LCSC has no {format_value(want, kind)} {line_package(ln)} part in "
+                                 "stock - choose the nearest value yourself", MISMATCH_ONLY)
+    found.reason = f"matches the Value; {note}"
+    return found
+
+
 def _other_listing(ln, need: int, search) -> Alternative | None:
     """LCSC sometimes lists one part twice (0026013115 and 26013115): find the listing that has stock."""
     if not ln.mpn or search is None:
@@ -328,6 +367,8 @@ def suggest(ln, results: list[PartResult], need: int, search=None) -> Alternativ
     does not list the part, or lists it without enough stock."""
     if ln.lcsc:
         own = next((r for r in results if r.supplier_pn == ln.lcsc), None)
+        if value_mismatch(ln, own):
+            return _for_value(ln, own, need, search)  # the schematic's Value wins over a wrong part number
         if own is not None and (own.stock or 0) >= need:
             return None  # already an LCSC part, and in stock
         other = _other_listing(ln, need, search)
@@ -341,6 +382,8 @@ def suggest(ln, results: list[PartResult], need: int, search=None) -> Alternativ
     if value_part_number(ln):
         return generic_pick(ln, results, need)
     same = same_part_pick(ln, results, need)
+    if same is not None and value_mismatch(ln, same.part):
+        return _for_value(ln, same.part, need, search)
     if same is not None and (same.part.stock or 0) >= need:
         return same  # LCSC has this very part: nothing else to recommend
     found = _replacement(ln, results, need, search, same.part if same else None)
@@ -379,6 +422,8 @@ def switch_back(ln) -> bool:
     return True
 
 
-def best(ln, need: int) -> Alternative | None:
-    """The suggestion for a line (from ln.alts), if it has one."""
-    return next((a for a in ln.alts.values() if a is not None), None)
+def best(ln, need: int, warnings: bool = False) -> Alternative | None:
+    """The suggestion for a line (from ln.alts), if it has one. warnings: also return a value-mismatch
+    warning, which names a problem but is not a part to switch to."""
+    a = next((a for a in ln.alts.values() if a is not None), None)
+    return a if a is None or warnings or not a.warning_only else None

@@ -401,6 +401,8 @@ def write_stock_report(lines: list[BomLine], sources: list[str], boards: int, pa
             p = alt.part
             row += [p.mpn, p.supplier_pn, p.manufacturer, p.stock if p.stock is not None else "",
                     p.price_str, alt.reason, ""]
+        elif ln.original is None and (warn := alternatives.best(ln, need, warnings=True)):
+            row += [""] * 5 + [warn.reason, ""]
         else:
             old = ln.original[0] if ln.original else {}
             row += [""] * 6 + [" ".join(x for x in (old.get("mpn", ""), old.get("lcsc", "")) if x) or

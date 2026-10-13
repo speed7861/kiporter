@@ -510,3 +510,28 @@ def test_lcsc_descriptions_are_tidied_and_only_fill_gaps(tmp_path):
     schedit.write(texts)
     text = f.read_text(encoding="utf-8")
     assert count == 1 and '"Description" "100nF cap"' in text and '"DESC" "my own text"' in text
+
+
+def test_bom_value_wins_over_a_wrong_part_number():
+    from kiporter import alternatives as alt
+    from kiporter.bom import BomLine
+    from kiporter.providers import PartResult
+
+    def res(pn, mpn, ohms, stock, mfr="YAGEO", tol="1"):
+        return PartResult(source="LCSC", mpn=mpn, supplier_pn=pn, manufacturer=mfr, package="0603", stock=stock,
+                          description="Chip Resistor", extra={"Attributes": f"Resistance: {ohms}Ω; Tolerance: ±{tol}%"})
+    wrong = res("C98220", "RC0603FR-0710KL", "10k", 8000000)
+    pool = [res("C22548", "RC0603FR-071KL", "1k", 10000000), res("C21190", "0603WAF1001T5E", "1k", 25000000, "UNI-ROYAL"),
+            res("C14676", "RC0603JR-071KL", "1k", 6000000, tol="5"), wrong]
+    ln = BomLine(refs=["R5", "R10"], qty=2, value="1K", footprint="PLEKTRON:R_0603",
+                 data={"mpn": "RC0603FR-0710KL", "lcsc": "C98220"})
+    assert alt.value_mismatch(ln, wrong) == (1000.0, 10000.0)
+    a = alt.suggest(ln, [wrong], 2, lambda kw: pool)
+    assert a.part.supplier_pn == "C22548" and "is 10k, but the Value says 1k" in a.reason and not a.exact
+    ok = BomLine(refs=["R8"], qty=1, value="10K", footprint="PLEKTRON:R_0603", data={"mpn": "RC0603FR-0710KL", "lcsc": "C98220"})
+    assert alt.value_mismatch(ok, wrong) is None and alt.suggest(ok, [wrong], 1, lambda kw: pool) is None
+    odd = BomLine(refs=["R7"], qty=1, value="1.94K", footprint="PLEKTRON:R_0603", data={"mpn": "RC0603FR-0747KL"})
+    w = alt.suggest(odd, [res("C105579", "RC0603FR-0747KL", "47k", 200000)], 1, lambda kw: pool)
+    assert w.warning_only and "no 1.94k 0603 part" in w.reason
+    odd.alts = {"LCSC": w}
+    assert alt.best(odd, 1) is None and alt.best(odd, 1, warnings=True) is w
