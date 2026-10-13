@@ -287,7 +287,10 @@ def passive_pick(ln, results: list[PartResult], need: int, ref: PartResult | Non
 def same_part_pick(ln, results: list[PartResult], need: int) -> Alternative | None:
     """LCSC's listing of the very same manufacturer part number (even when it is out of stock)."""
     target = _norm_mpn(ln.mpn)
-    same = [Alternative(r, "same part at LCSC", SAME_PART) for r in results if target and _norm_mpn(r.mpn) == target]
+    def same_number(r: PartResult) -> bool:
+        cand = _norm_mpn(r.mpn)  # all-digit numbers (Molex) are often written without their leading zeros
+        return cand == target or (target.isdigit() and cand.lstrip("0") == target.lstrip("0"))
+    same = [Alternative(r, "same part at LCSC", SAME_PART) for r in results if target and same_number(r)]
     if not same:
         return None
     return max(same, key=lambda a: ((a.part.stock or 0) >= need, a.part.stock or 0))

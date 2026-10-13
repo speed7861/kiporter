@@ -1069,7 +1069,7 @@ class BomTab(ttk.Frame):
         ln = self.lines[int(sel[0])]
         self.app.search_var.set(ln.mpn or ln.lcsc or ln.value)
         self.app.nb.select(0)
-        self.app.search()
+        self.app.search(show_all=True)  # looking for this one part: do not let the CAD filter hide it
 
 
 class BomExportDialog(_ToolDialog):

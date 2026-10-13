@@ -757,6 +757,8 @@ def best_match(results: list[PartResult], mpn: str) -> PartResult | None:
     """Pick the result matching an MPN exactly (or close), preferring the most stock."""
     t = _norm_mpn(mpn)
     exact = [r for r in results if _norm_mpn(r.mpn) == t]
+    if not exact and t.isdigit():  # all-digit numbers (Molex 0903253010) are often written without leading zeros
+        exact = [r for r in results if _norm_mpn(r.mpn).lstrip("0") == t.lstrip("0")]
     pool = exact or [r for r in results if _norm_mpn(r.mpn).startswith(t)]
     return max(pool, key=lambda r: r.stock or 0) if pool else None
 

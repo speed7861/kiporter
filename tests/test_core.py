@@ -426,3 +426,14 @@ def test_bom_capacitor_replacement_keeps_the_ratings():
     assert asked[0] == "100nF 0603 X7R"
     own.stock = 500
     assert alt.suggest(ln, [own], 2, lambda kw: pool) is None  # in stock again: left alone
+
+
+def test_best_match_ignores_leading_zeros_of_numeric_part_numbers():
+    from kiporter.providers import PartResult, best_match
+    hits = [PartResult(source="LCSC", mpn="0903253010", supplier_pn="C17265185", stock=5)]
+    assert best_match(hits, "903253010").supplier_pn == "C17265185"
+    assert best_match([PartResult(source="LCSC", mpn="0LM358", stock=5)], "LM358") is None
+    from kiporter import alternatives as alt
+    from kiporter.bom import BomLine
+    j1 = BomLine(refs=["J1"], qty=1, value="903253010", footprint="x:y", data={"mpn": "903253010"})
+    assert alt.suggest(j1, hits, 1).exact

@@ -60,6 +60,7 @@ class App(tk.Tk):
         self.project_libs: list[library.LibraryTarget] = []
         self.global_libs: list[library.LibraryTarget] = []
         self._ui_q: queue.Queue = queue.Queue()
+        self._show_all = False  # current search ignores the 'Show' filter
         self._busy = 0  # background jobs in flight
         self._spin_iid: str | None = None
         self._pending_sources: set = set()
@@ -675,10 +676,12 @@ class App(tk.Tk):
         return usable
 
     # ================================================================ search
-    def search(self) -> None:
+    def search(self, show_all: bool = False) -> None:
+        """show_all: do not apply the 'Show' CAD filter to this search (used when looking up one known part)."""
         kw = self.search_var.get().strip()
         if not kw:
             return
+        self._show_all = show_all
         self._sources_changed()
         wanted = [n for n, v in self.source_vars.items() if v.get()]
         names = self.ensure_connected(wanted)
@@ -724,6 +727,12 @@ class App(tk.Tk):
         in_stock = sum(1 for r in self.results.values() if r.stock)
         pending = len(self._cad_queued)
         msg = f"{shown} of {len(self.results)} results shown ({in_stock} in stock)"
+        hidden = len(self.results) - shown
+        label = dict(CAD_FILTERS).get(self.settings.cad_filter, "")
+        if hidden and self.settings.cad_filter != "any":
+            msg += f" • {hidden} hidden because 'Show' is set to '{label}'"
+        elif self._show_all and self.settings.cad_filter != "any":
+            msg += " • showing every match for this part ('Show' filter not applied)"
         if cad.blocked_for():
             msg += " • EasyEDA is blocking CAD lookups for a few minutes (cached parts still work)"
         elif pending:
@@ -840,6 +849,7 @@ class App(tk.Tk):
 
     def _cad_filter_changed(self) -> None:
         self.settings.cad_filter = CAD_FILTERS[max(self.cad_filter_combo.current(), 0)][0]
+        self._show_all = False  # the user picked a filter: apply it
         self.settings.save()
         if self.settings.cad_filter != "any":
             self._queue_cad_checks()
@@ -848,7 +858,7 @@ class App(tk.Tk):
 
     def _passes(self, r: PartResult) -> bool:
         need = {"symfp": 2, "symfp3d": 3}.get(self.settings.cad_filter, 0)
-        if not need:
+        if not need or self._show_all:
             return True
         sc = cad.score(r)
         return sc == -1 or sc >= need  # keep unknowns visible until their check finishes
