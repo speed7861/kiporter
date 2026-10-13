@@ -295,10 +295,11 @@ def test_bom_switch_to_lcsc_suggestion():
     assert ic.lcsc == "C5423" and ic.mpn == "LM358DR" and ic.offers["LCSC"].stock == 900 and ic.offers["Mouser"] is None
     assert alt.switch_back(ic) and ic.lcsc == "" and "LCSC" not in ic.offers and not alt.switch_back(ic)
 
-    b = alt.suggest(ic, res, 5000)  # LCSC lists the part, so it is suggested even though it is short
-    assert b.exact and b.part.supplier_pn == "C5423"
+    b = alt.suggest(ic, res, 5000)  # LCSC is short of the same part: the family member with stock is offered
+    assert not b.exact and b.part.supplier_pn == "C7950" and "C5423 has 900" in b.reason
     ic.data["lcsc"] = "C5423"
-    assert alt.suggest(ic, res, 5000) is None  # already an LCSC part: nothing to recommend
+    assert alt.suggest(ic, res, 10) is None  # already an LCSC part and in stock: nothing to recommend
+    assert alt.suggest(ic, res, 5000).part.supplier_pn == "C7950"  # ... but short: a replacement is offered
     ic.data["lcsc"] = ""
     fam = alt.suggest(ic, res[1:], 10)  # LCSC does not list it: the family member is offered
     assert not fam.exact and fam.part.supplier_pn == "C7950"
@@ -400,3 +401,28 @@ def test_switch_back_map_is_derived_from_the_backup(tmp_path):
     libtools._save_localize_map(tmp_path, {"A:X": "P:X"}, {"A:F": "P:F"}, {})
     saved = json.loads((tmp_path / "kiporter-backup" / libtools.LOCALIZE_MAP).read_text(encoding="utf-8"))
     assert saved["sym"] == {"P:X": "A:X"} and saved["fp"] == {"P:F": "A:F"}
+
+
+def test_bom_capacitor_replacement_keeps_the_ratings():
+    from kiporter import alternatives as alt
+    from kiporter.bom import BomLine
+    from kiporter.providers import PartResult
+
+    def cap(pn, mpn, volts, diel, tol, stock, mfr="YAGEO"):
+        return PartResult(source="LCSC", mpn=mpn, supplier_pn=pn, manufacturer=mfr, package="0603", stock=stock,
+                          description=f"100nF {volts}V {diel} ±{tol}% 0603 Multilayer Ceramic Capacitors")
+    own = cap("C2649559", "CC0603KPX7R7BB104", 16, "X7R", 10, 0)
+    pool = [cap("C91184", "CC0603MRY5V9BB104", 50, "Y5V", 20, 9000000),
+            cap("C14663", "CC0603KRX7R9BB104", 50, "X7R", 10, 53000000),
+            cap("C108079", "CC0603KRX7R7BB104", 16, "X7R", 10, 1500000),
+            cap("C1", "CL10B104KP8NNNC", 10, "X7R", 10, 99999999, "SAMSUNG"),
+            cap("C2", "CC0603ZRX7R7BB104", 16, "X7R", 20, 99999999)]
+    ln = BomLine(refs=["C2", "C3"], qty=2, value="0.1U", footprint="PLEKTRON:C_0603",
+                 data={"mpn": "CC0603KPX7R7BB104", "lcsc": "C2649559"})
+    assert abs(alt.schematic_value("0.1U", "capacitor") - 1e-7) < 1e-12
+    asked = []
+    a = alt.suggest(ln, [own], 2, lambda kw: asked.append(kw) or pool)
+    assert a.part.supplier_pn == "C108079" and "X7R" in a.reason and "C2649559 has 0 in stock" in a.reason
+    assert asked[0] == "100nF 0603 X7R"
+    own.stock = 500
+    assert alt.suggest(ln, [own], 2, lambda kw: pool) is None  # in stock again: left alone

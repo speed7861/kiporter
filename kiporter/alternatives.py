@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 from .providers import PartResult, _norm_mpn, guess_package
 
@@ -29,7 +30,7 @@ _IN_TEXT = {
     "inductor": re.compile(_NUM + r"\s*([nuµμmNU])[hH]"),
 }
 # values as people type them in a schematic: 10k, 4k7, 4R7, 100n, 0.1uF, 4u7
-_SCHEMATIC = re.compile(r"^\s*" + _NUM + r"\s*([RrkKmMGpnuµμ]?)(\d+)?\s*(?:Ω|Ω|ohms?|[FfHh])?(?![A-Za-z0-9])")
+_SCHEMATIC = re.compile(r"^\s*" + _NUM + r"\s*([RrkKmMGpnuµμPNU]?)(\d+)?\s*(?:Ω|Ω|ohms?|[FfHh])?(?![A-Za-z0-9])")
 
 
 _CHIP = re.compile(r"(?<!\d)(01005|0201|0402|0603|0805|1206|1210|1812|2010|2512)(?!\d)")
@@ -113,8 +114,10 @@ def schematic_value(value: str, kind: str) -> float | None:
             return None
         num = f"{num}.{frac}"
     if kind == "resistor":
-        if unit in ("p", "n", "u", "µ", "μ"):
+        if unit in ("p", "n", "u", "µ", "μ", "P", "N", "U"):
             return None
+    elif unit in ("P", "N", "U"):
+        unit = unit.lower()  # 0.1U, 100N: capitals are common in schematics
     elif unit in ("", "R", "r", "k", "K", "M", "G"):
         return None  # a bare number is not a capacitance or inductance
     return float(num) * _MULT[unit.lower() if unit in ("R",) else unit]
@@ -151,13 +154,19 @@ def format_value(v: float, kind: str) -> str:
     return f"{v:g}{unit}"
 
 
-def keyword(ln) -> str | None:
-    """Search words for a same-value part, e.g. '10k 0603 resistor'. None if the line is not a plain passive."""
+def keyword(ln, ref: PartResult | None = None) -> str | None:
+    """Search words for a same-value part, e.g. '10k 0603 resistor'. None if the line is not a plain passive.
+    ref: LCSC's listing of the line's part, used when the line itself does not give the value or package."""
     kind = kind_of(ln.refs)
     if not kind:
         return None
     v = line_value(ln, kind)
     pkg = line_package(ln)
+    if ref is not None:
+        if v is None:
+            found = values_in(_text(ref), kind)
+            v = found[0] if found else None
+        pkg = pkg or ref.package
     if v is None or not pkg:
         return None
     return f"{format_value(v, kind)} {pkg} {kind}"
@@ -205,21 +214,73 @@ def family_pick(ln, results: list[PartResult], need: int) -> Alternative | None:
     return _rank(out, need)
 
 
-def passive_pick(ln, results: list[PartResult], need: int) -> Alternative | None:
-    """A resistor / capacitor / inductor with the same value in the same package."""
+_DIELECTRIC = re.compile(r"(?<![A-Za-z0-9])(X7R|X5R|X7S|X7T|X6S|X8R|X8L|C0G|NP0|Y5V|Z5U)(?![A-Za-z0-9])", re.I)
+_VOLT_ATTR = re.compile(r"Voltage[^:;]*:\s*(\d+(?:\.\d+)?)\s*(k?)V", re.I)
+_VOLT = re.compile(r"(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)\s*(k?)V(?![A-Za-z0-9])")
+_TOL = re.compile(r"±\s*(\d+(?:\.\d+)?)\s*%")
+
+
+def specs(text: str) -> dict:
+    """Dielectric, rated voltage and tolerance as far as a description gives them."""
+    out: dict = {}
+    m = _DIELECTRIC.search(text or "")
+    if m:
+        out["dielectric"] = m.group(1).upper().replace("NP0", "C0G")
+    m = _VOLT_ATTR.search(text or "") or _VOLT.search(text or "")
+    if m:
+        out["volts"] = float(m.group(1)) * (1000 if m.group(2) else 1)
+    m = _TOL.search(text or "")
+    if m:
+        out["tol"] = float(m.group(1))
+    return out
+
+
+def passive_pick(ln, results: list[PartResult], need: int, ref: PartResult | None = None) -> Alternative | None:
+    """A resistor / capacitor / inductor with the same value in the same package.
+    ref: the part being replaced (LCSC's own listing of it) - its dielectric, voltage and tolerance must be met."""
     kind = kind_of(ln.refs)
-    v = line_value(ln, kind) if kind else None
-    want = line_package(ln)
+    if not kind:
+        return None
+    ref_text = _text(ref) if ref is not None else ""
+    v = line_value(ln, kind)
+    if v is None:
+        found = values_in(ref_text, kind)
+        v = found[0] if found else None
+    want = line_package(ln) or (ref.package if ref is not None else "")
     if v is None or not want:
         return None
+    wanted = specs(f"{ref_text} {ln.description}")
     target = _norm_mpn(ln.mpn)
+    ref_mfr = (ref.manufacturer if ref is not None else ln.manufacturer or "").lower()
     out = []
     for r in results:
         if target and _norm_mpn(r.mpn) == target:
             continue
         if _package_ok(want, r) is not True or not any(_close(v, x) for x in values_in(_text(r), kind)):
             continue
-        out.append(Alternative(r, f"same value and package ({format_value(v, kind)} {want}), check tolerance and rating"))
+        have = specs(_text(r))
+        score = 0.0
+        if "dielectric" in wanted:
+            if have.get("dielectric") != wanted["dielectric"]:
+                continue  # an X7R part is not replaced by Y5V
+            score += 1
+        if "volts" in wanted and "volts" in have:
+            if have["volts"] < wanted["volts"]:
+                continue
+            score += 1 if have["volts"] == wanted["volts"] else 0.5
+        if "tol" in wanted and "tol" in have:
+            if have["tol"] > wanted["tol"]:
+                continue
+            score += 0.5
+        if ref_mfr and ref_mfr.split()[0] in r.manufacturer.lower():
+            score += 0.5
+        if target:
+            score += 0.5 * SequenceMatcher(None, target, _norm_mpn(r.mpn)).ratio()
+        met = [str(x) for x in (wanted.get("dielectric"), f"{have['volts']:g}V" if "volts" in wanted and "volts" in have
+                                else None, f"±{have['tol']:g}%" if "tol" in wanted and "tol" in have else None) if x]
+        detail = ", ".join([f"{format_value(v, kind)} {want}"] + met)
+        out.append(Alternative(r, f"same value and package ({detail})"
+                               + ("" if len(met) == 3 else ", check tolerance and rating"), score))
     return _rank(out, need)
 
 
@@ -232,22 +293,45 @@ def same_part_pick(ln, results: list[PartResult], need: int) -> Alternative | No
     return max(same, key=lambda a: ((a.part.stock or 0) >= need, a.part.stock or 0))
 
 
+def _replacement(ln, results: list[PartResult], need: int, search, ref: PartResult | None) -> Alternative | None:
+    """An in-stock part to use instead: same family, or same value and package (meeting ref's ratings)."""
+    found = family_pick(ln, results, need) if ln.mpn else None
+    if (found is None or (found.part.stock or 0) < need or kind_of(ln.refs)) and search is not None:
+        kw = keyword(ln, ref)
+        if kw:
+            want = specs(f"{_text(ref) if ref is not None else ''} {ln.description}").get("dielectric")
+            hits = list(search(f"{kw.rsplit(' ', 1)[0]} {want}")) if want else []
+            if len(hits) < 10:
+                hits += list(search(kw))
+            found = _rank([a for a in (found, passive_pick(ln, hits, need, ref)) if a], need)
+    return found
+
+
 def suggest(ln, results: list[PartResult], need: int, search=None) -> Alternative | None:
-    """LCSC suggestion for a line without an LCSC number. results: LCSC's answer for the line's part number;
-    search(keyword) -> results is used for a same-value lookup when LCSC does not list the part."""
+    """LCSC suggestion for a line. results: LCSC's answer for the line's LCSC or part number;
+    search(keyword) -> results is used for same-value lookups.
+
+    A part that LCSC has enough of is never replaced. A different part is suggested only when LCSC
+    does not list the part, or lists it without enough stock."""
     if ln.lcsc:
-        return None  # already an LCSC part
+        own = next((r for r in results if r.supplier_pn == ln.lcsc), None)
+        if own is not None and (own.stock or 0) >= need:
+            return None  # already an LCSC part, and in stock
+        found = _replacement(ln, results, need, search, own)
+        if found is not None and own is not None:
+            found.reason += f"; {ln.lcsc} has {own.stock or 0} in stock"
+        return found
     if value_part_number(ln):
         return generic_pick(ln, results, need)
-    found = same_part_pick(ln, results, need)
-    if found is not None:
-        return found  # LCSC lists this very part: nothing else to recommend
-    found = family_pick(ln, results, need) if ln.mpn else None
-    if (found is None or (found.part.stock or 0) < need) and search is not None:
-        kw = keyword(ln)
-        if kw:
-            found = _rank([a for a in (found, passive_pick(ln, search(kw), need)) if a], need)
-    return found
+    same = same_part_pick(ln, results, need)
+    if same is not None and (same.part.stock or 0) >= need:
+        return same  # LCSC has this very part: nothing else to recommend
+    found = _replacement(ln, results, need, search, same.part if same else None)
+    if found is not None and (found.part.stock or 0) >= need:
+        if same is not None:
+            found.reason += f"; LCSC's own {same.part.supplier_pn} has {same.part.stock or 0} in stock"
+        return found
+    return same or found
 
 
 def switch(ln, alt: Alternative) -> None:

@@ -202,12 +202,12 @@ Click **Save** when you're done.
   and DNP status.
 - **Stock & lead-time check** at every connected supplier, for the number of boards you plan
   to build.
-- **Suggested LCSC parts:** for lines with no LCSC number, Kiporter
-  suggests an LCSC part: the very same manufacturer part number if LCSC stocks it, otherwise the
-  same part family, or the same value and package for resistors, capacitors and inductors.
-  **Use suggested LCSC part** switches the selected BOM lines to it, so the LCSC column is
-  filled in for JLCPCB exports (right-click to switch back). Similar parts are not checked for
-  tolerance, rating or suffix - check those yourself.
+- **Suggested LCSC parts:** Kiporter suggests an LCSC part for lines with no LCSC number, and a
+  replacement for lines whose LCSC part is out of stock. It prefers the very same manufacturer
+  part number, then the same part family, then - for resistors, capacitors and inductors - the
+  same value and package with the same dielectric, at least the same voltage and the same or
+  better tolerance. A part LCSC has enough of is never replaced.
+  **Use suggested LCSC part** switches BOM lines to the suggestion (right-click to switch back).
 - **Save to schematic:** writes the switched part numbers into the fields of the symbols already
   in your schematic. No symbol or footprint is replaced or moved, and a backup is kept. Close the
   Schematic Editor first, then run Update PCB from Schematic to copy the fields to the board.
