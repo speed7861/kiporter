@@ -215,6 +215,24 @@ class LCSC(Provider):
     help_text = "LCSC/JLCPCB needs no account. Every LCSC part comes with a free EasyEDA symbol, footprint and 3D model."
 
     def search(self, keyword: str, limit: int = 50) -> list[PartResult]:
+        """Keyword search. The catalogue is fussy about word order and units ("header 2.54 mm" finds
+        nothing, "2.54mm header" finds thousands), so reworded versions are tried until enough turn up."""
+        found: dict[str, PartResult] = {}
+        strict, relaxed = _keyword_variants(keyword)
+        for kw in strict:
+            for r in self._query(kw, limit):
+                found.setdefault(r.lcsc_id or r.mpn, r)
+            if len(found) >= limit:
+                break
+        if not found:
+            for kw in relaxed:
+                for r in self._query(kw, 100):
+                    found.setdefault(r.lcsc_id or r.mpn, r)
+                if len(found) >= 2 * limit:
+                    break
+        return _best_keyword_matches(keyword, list(found.values()))[:limit]
+
+    def _query(self, keyword: str, limit: int = 50) -> list[PartResult]:
         try:
             r = requests.post(JLC_SEARCH, json={"keyword": keyword, "currentPage": 1, "pageSize": limit},
                               headers=UA, timeout=TIMEOUT)
@@ -257,7 +275,59 @@ class LCSC(Provider):
 
 
 def search_lcsc(keyword: str, limit: int = 50) -> list[PartResult]:
-    return LCSC(Settings()).search(keyword, limit)
+    """One exact query, used for part-number lookups."""
+    return LCSC(Settings())._query(keyword, limit)
+
+
+_UNIT_RE = r"(mm|mil|v|a|ma|w|ohm|ohms|r|k|m|uf|nf|pf|uh|nh|mh|hz|khz|mhz|pin|pins|p|pos|bit)"
+_MAX_LCSC_TRIES = 5
+
+
+def _keyword_variants(keyword: str) -> tuple[list[str], list[str]]:
+    """Rewordings of a search: (same meaning, fewer words). Values go first, as the catalogue likes."""
+    kw = " ".join(keyword.split())
+    joined = re.sub(rf"(\d)\s+{_UNIT_RE}\b", r"\1\2", kw, flags=re.I)  # "2.54 mm" -> "2.54mm"
+    toks = joined.split()
+    specs = [t for t in toks if re.search(r"\d", t)]
+    words = [t for t in toks if not re.search(r"\d", t)]
+    bare = [re.sub(rf"(?<=\d){_UNIT_RE}$", "", t, flags=re.I) for t in specs]  # "2.54mm" -> "2.54"
+    strict = [kw, joined, " ".join(specs + words), " ".join(words + specs),
+              " ".join(bare + words), " ".join(words + bare)]
+    # looser tries for when none of those work: category-style plural, value + one word, single words
+    by_len = sorted(words, key=len, reverse=True)
+    relaxed = []
+    if words and not words[-1].lower().endswith("s"):
+        relaxed.append(" ".join(specs + words[:-1] + [words[-1] + "s"]))
+    relaxed += [f"{s} {w}" for s in specs[:1] for w in by_len[:2]]
+    relaxed += specs[:1] + by_len[:2]
+    strict = list(dict.fromkeys(v for v in strict if v))[:_MAX_LCSC_TRIES]
+    relaxed = [v for v in dict.fromkeys(relaxed) if v and v not in strict][:_MAX_LCSC_TRIES]
+    return strict, relaxed
+
+
+def _best_keyword_matches(keyword: str, results: list[PartResult]) -> list[PartResult]:
+    """Keep the results that mention the most search words, so reworded searches stay on topic."""
+    joined = re.sub(rf"(\d)\s+{_UNIT_RE}\b", r"\1\2", keyword.lower())
+    toks = []
+    for t in joined.split():
+        if re.search(r"\d", t):
+            t = re.sub(rf"(?<=\d){_UNIT_RE}$", "", t)
+        elif len(t) > 3 and t.endswith("s"):
+            t = t[:-1]
+        toks.append(re.sub(r"[\s\-_]", "", t).replace("*", "x"))
+    toks = [t for t in toks if t]
+    if not toks or not results:
+        return results
+
+    def score(r: PartResult) -> int:
+        blob = " ".join([r.mpn, r.manufacturer, r.description, r.package, r.category,
+                         *(str(v) for v in r.extra.values())]).lower()
+        blob = re.sub(r"[\s\-_]", "", blob).replace("*", "x")
+        return sum(t in blob for t in toks)
+
+    scored = [(score(r), r) for r in results]
+    top = max(sc for sc, _ in scored)
+    return [r for sc, r in scored if sc == top]
 
 
 def _norm_mpn(s: str) -> str:

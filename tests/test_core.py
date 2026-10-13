@@ -205,3 +205,14 @@ def test_user_bom_plugin_is_listed_first(tmp_path):
     s.bom_plugin_paths = {"My_BOM": str(script)}
     ts = bom.kicad_templates(pro, kicad_env.KiCadInstall("10.0", tmp_path), s)
     assert bom.USER_MARK in ts[0].name and ts[0].source == "user" and ts[0].command[0] == str(script)
+
+
+def test_lcsc_keyword_variants():
+    from kiporter.providers import PartResult, _best_keyword_matches, _keyword_variants
+    strict, relaxed = _keyword_variants("header 2.54 mm")
+    assert strict[0] == "header 2.54 mm" and "2.54mm header" in strict
+    assert "2.54mm headers" in relaxed
+    assert _keyword_variants("LM358") == (["LM358"], [])
+    hits = [PartResult(source="LCSC", mpn="2.54-1*4P", description="Pin Header"),
+            PartResult(source="LCSC", mpn="XH-3A", description="Header")]
+    assert [r.mpn for r in _best_keyword_matches("header 2.54 mm 1x4", hits)] == ["2.54-1*4P"]

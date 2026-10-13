@@ -70,7 +70,7 @@ class App(tk.Tk):
         self._zip_sizes: dict[str, int] = {}
         self._watch_start = time.time()
 
-        self.title(f"{APP_TITLE} — KiCad part importer")
+        self.title(f"{APP_TITLE} — A KiCad Helper")
         self.geometry("1440x900")
         self.minsize(1050, 680)
         self._build_ui()
