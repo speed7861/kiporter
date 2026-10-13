@@ -28,6 +28,111 @@ project, sets up the libraries and paths for you, and handles the whole job: sea
 import, BOM and fabrication files. It's meant to work straight away, without the
 configuration.
 
+## Install
+
+You need **KiCad 8 or newer** (KiCad 9+ is required for 3D previews) and an internet connection.
+
+Download the latest version from the
+[Releases page](https://github.com/speed7861/kiporter/releases/latest) (Source code ZIP) and unzip it.
+
+| OS | How |
+|---|---|
+| **Windows** | Double-click **`Install.bat`** in the unzipped folder. It installs Python if needed, creates the Desktop and Start Menu shortcuts, and starts Kiporter. |
+| **macOS** | In Terminal: `./install.sh`. This creates `~/Applications/Kiporter.app`. It needs Python 3.9+ with Tk; the script offers to install it with Homebrew. |
+| **Linux** | In a terminal: `./install.sh`. This adds Kiporter to the app menu and a `kiporter` command. On Ubuntu/Debian it offers to install `python3-venv python3-tk`. Optionally install `xdotool wmctrl`. |
+
+Kiporter works with standard KiCad installs:
+- Windows: `Program Files` or per-user installs
+- macOS: `/Applications/KiCad`
+- Linux: distribution packages and the Flatpak
+
+On first start, Kiporter creates and registers a default local library, enables KiCad's API,
+and offers to connect suppliers.
+
+## How to use Kiporter
+
+### First start (about 2 minutes, once)
+
+1. **Open Kiporter** from the shortcut the installer created.
+2. **Connect suppliers (optional).** A welcome message offers to do this; you can also skip it.
+   LCSC works with no account. For Digi-Key, Mouser and the others, open
+   **Settings → Suppliers**, follow the directions on the supplier's tab, paste the key and
+   press **Enter**. Suppliers that aren't connected yet are shown in red.
+3. **Pick where new parts go.** Kiporter asks which library to import into:
+   - **Project library:** the parts live inside your project folder, so the project carries them along.
+   - **Local library:** shared by all your projects.
+
+   Pick one, or let Kiporter create a new library. You can change it any time in the
+   **Import into** box.
+
+### Add a part to your design
+
+1. **Open your project in KiCad.** Kiporter finds it automatically; it's shown at the top
+   marked **● OPEN**. If it isn't, click **Detect** or **Browse…**.
+2. **Search.** On the **Search & Import** tab, type a part number or keyword (for example
+   `LM358` or `10k 0603`) and press **Enter**.
+3. **Choose a result.** Results are sorted by stock, most first. The columns show stock,
+   lead time, price and CAD availability. Use **Show** to list only parts with a symbol +
+   footprint (+ 3D model).
+4. **Check it** in the preview on the right: **Details**, **Photo**, **Symbol**,
+   **Footprint** and **3D**. For parts from Mouser, Digi-Key and other suppliers, the
+   **Model from** list lets you compare models from different CAD sources.
+5. **Import it.** Double-click the part, or click **⬇ Import selected part**. The part's
+   name is copied to your clipboard.
+6. **Place it in KiCad.** In the Schematic Editor press **A** and paste (**Ctrl+V**) to
+   find it. Then click **Update PCB from Schematic** in Kiporter to send it to the board.
+
+> The first time a new library is used, restart KiCad (local library) or reopen the project
+> (project library) once so KiCad loads it.
+
+**No model available?** Click **Find CAD elsewhere…**, download the KiCad ZIP from SnapEDA,
+Ultra Librarian or SamacSys, and save it to your Downloads folder. Kiporter imports it
+automatically.
+
+### Check stock and export the BOM
+
+1. On the **BOM** tab, click **Load BOM from project**.
+2. Set **Boards to build** and click **Check stock & lead times**. Each line turns green
+   (in stock), orange (short) or red (unavailable).
+3. Click **Export for board house / distributor…**, choose a format (for example JLCPCB, or
+   your own KiCad BOM preset marked ★), check the preview and click **Export**.
+
+### Get files to order boards
+
+1. On the **Fabrication** tab, choose your **Board house**.
+2. Click **Generate Build folder**. Kiporter refills zones and runs DRC on a copy of the
+   board (your file isn't changed). It then writes the schematic PDF, BOM, Gerbers, drill
+   files, pick-and-place file and an upload ZIP into `<Project> Build` next to your project.
+3. Read the **Check before ordering** notes, such as DRC errors or missing part numbers,
+   then upload the ZIP to the board house.
+
+Need a different setup? Click **Custom Gerber setup…** to choose the layers and file options yourself.
+
+### Keep your libraries tidy
+
+Open the **Library Tools** tab:
+- **Clean up & auto-link:** fixes missing links between symbols, footprints and 3D models.
+- **Merge libraries:** combines several libraries into one.
+- **Make project self-contained:** copies every part a project uses into its project
+  library, before you share or archive it.
+- **KiCad setup check:** finds broken library paths.
+- **Browse & preview a library:** shows what's in any library.
+
+Every fix is shown first and a backup is made before anything changes.
+
+### Change how Kiporter works
+
+Everything is under **Settings**:
+- **Libraries:** default libraries.
+- **Symbol fields:** the names of the fields added to imported symbols.
+- **Search:** search and preview options.
+- **Suppliers:** API keys.
+- **CAD sources:** which CAD libraries are used for non-LCSC parts, and in what order.
+- **KiCad:** which KiCad version to use.
+- **BOM:** BOM defaults.
+
+Click **Save** when you're done.
+
 ## Features
 
 ### Search & Import
@@ -103,27 +208,6 @@ If no preset fits, make a **custom Gerber setup**. You choose the layers, Gerber
   disabled API.
 - **Back up a library** to a ZIP file.
 
-## Install
-
-You need **KiCad 8 or newer** (KiCad 9+ is required for 3D previews) and an internet connection.
-
-Download the latest version from the
-[Releases page](https://github.com/speed7861/kiporter/releases/latest) (Source code ZIP) and unzip it.
-
-| OS | How |
-|---|---|
-| **Windows** | Download or clone this repo and double-click **`Install.bat`**. It installs Python if needed, creates the Desktop and Start Menu shortcuts, and starts Kiporter. |
-| **macOS** | In Terminal: `./install.sh`. This creates `~/Applications/Kiporter.app`. It needs Python 3.9+ with Tk; the script offers to install it with Homebrew. |
-| **Linux** | In a terminal: `./install.sh`. This adds Kiporter to the app menu and a `kiporter` command. On Ubuntu/Debian it offers to install `python3-venv python3-tk`. Optionally install `xdotool wmctrl`. |
-
-Kiporter works with standard KiCad installs:
-- Windows: `Program Files` or per-user installs
-- macOS: `/Applications/KiCad`
-- Linux: distribution packages and the Flatpak
-
-On first start, Kiporter creates and registers a default local library, enables KiCad's API,
-and offers to connect suppliers.
-
 ## Supplier API keys
 
 LCSC works immediately. Digi-Key, Mouser, Farnell/Newark, TME and Octopart each give out
@@ -139,23 +223,3 @@ directions are in **Settings → Suppliers** inside the app (paste the key and p
   Kiporter's export dialog and the shop's own page before ordering.
 - On macOS, the Update-PCB keyboard fallback needs Accessibility permission. On Linux/X11 it
   needs `xdotool`.
-
-## Development
-
-```bash
-python -m pip install -r requirements.txt pytest
-python -m pytest tests        # offline tests, run on Windows/macOS/Linux in CI
-python run.pyw                # start the app
-```
-
-| Module | Purpose |
-|---|---|
-| `kiporter/gui.py` | Main window, Search & Import tab |
-| `kiporter/settings_gui.py` | Settings tab, supplier accounts and directions |
-| `kiporter/tools_gui.py` | BOM tab, Library Tools, library browser |
-| `kiporter/fab.py`, `fab_gui.py` | Fabrication outputs (Build folder, Gerbers, ZIP) |
-| `kiporter/providers.py` | Supplier search (normalized results) |
-| `kiporter/cad.py`, `render.py` | CAD availability, previews (canvas + kicad-cli 3D) |
-| `kiporter/bom.py` | BOM reading and board-house / distributor formats |
-| `kiporter/library.py`, `libtools.py`, `fields.py` | Library install, maintenance, field rules |
-| `kiporter/kicad_env.py`, `kicad_control.py` | KiCad discovery (all OSes), lib tables, Update PCB |

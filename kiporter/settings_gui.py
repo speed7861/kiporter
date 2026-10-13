@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 APP_TITLE = "Kiporter"
 REPO_URL = "https://github.com/speed7861/kiporter"
+HOWTO_URL = REPO_URL + "#how-to-use-kiporter"
+CONTACT_EMAIL = "speed7861@gmail.com"
 
 SUPPLIER_FIELDS = {
     "LCSC": [],
@@ -480,8 +482,19 @@ class SettingsTab(ttk.Frame):
         self.note(p, "Search LCSC, Digi-Key, Mouser, Farnell/Newark, TME and Octopart; import symbols, footprints "
                      "and 3D models into KiCad; maintain libraries; check and export BOMs.")
         r = self._next(p)
+        cf = ttk.Frame(p)
+        cf.grid(row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(cf, text="Made by Mark T.  •  Contact:").pack(side="left")
+        mail = ttk.Label(cf, text=CONTACT_EMAIL, foreground="#1f5fa8", cursor="hand2")
+        mail.pack(side="left", padx=4)
+        mail.bind("<Button-1>", lambda e: webbrowser.open(f"mailto:{CONTACT_EMAIL}?subject=Kiporter"))
+        ttk.Button(cf, text="Copy e-mail", command=lambda: (self.clipboard_clear(), self.clipboard_append(
+            CONTACT_EMAIL))).pack(side="left", padx=6)
+        r = self._next(p)
         bf = ttk.Frame(p)
         bf.grid(row=r, column=0, columnspan=3, sticky="w", pady=10)
+        ttk.Button(bf, text="How to use Kiporter", style="Accent.TButton",
+                   command=lambda: webbrowser.open(HOWTO_URL)).pack(side="left", padx=(0, 6))
         ttk.Button(bf, text="Project on GitHub", command=lambda: webbrowser.open(REPO_URL)).pack(side="left")
         ttk.Button(bf, text="API key guide", command=lambda: webbrowser.open(guides.GUIDE_URL)).pack(side="left",
                                                                                                    padx=6)
