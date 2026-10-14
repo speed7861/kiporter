@@ -1,5 +1,5 @@
-"""Fabrication outputs: '<Project> Build' folder with schematic PDF, BOM, DRC report and
-a 'Gerbers' sub-folder with Gerbers, drill and placement files, plus an upload zip.
+"""Fabrication outputs: '<Project> Build' folder with schematic PDF, BOM, placement (CPL) file, DRC report
+and a 'Gerbers' sub-folder with Gerbers and drill files; plus a production zip of the whole folder.
 
 Zones are refilled and DRC is run on a temporary copy of the board, so the
 user's .kicad_pcb is never modified (safe even while it is open in KiCad).
@@ -123,7 +123,7 @@ class FabProfile:
 PROFILES: list[FabProfile] = [
     FabProfile("JLCPCB", {"x2": False, "subtract_soldermask": True, "bom_format": "JLCPCB",
                           "notes": "Upload the Gerber zip on jlcpcb.com. For assembly, upload the BOM and the CPL file "
-                                   "from the Gerbers folder in the assembly step and check part rotations in the "
+                                   "from the Build folder in the assembly step and check part rotations in the "
                                    "preview.", "url": "https://jlcpcb.com/quote"}),
     FabProfile("PCBWay", {"x2": False, "bom_format": "PCBWay",
                           "notes": "Upload the Gerber zip; for assembly add the BOM (.xlsx preferred) and the "
@@ -292,7 +292,7 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
             else:
                 res.warnings.append(f"Schematic PDF failed: {(r.stderr or r.stdout).strip()[:300]}")
 
-        # 3) BOM (+ CPL in the Gerbers folder)
+        # 3) BOM
         lines = None
         if (opts.bom or opts.placement) and sch.exists():
             try:
@@ -332,8 +332,9 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
                     places = bom.read_positions(work_pcb.with_suffix(".kicad_pro"), ki)
                     dnp = {r for l in (lines or []) if l.dnp for r in l.refs} if not settings.bom_include_dnp else set()
                     cpl_fmt = fmt.cpl or "Generic"
-                    # placement files are always CSV (board houses' pick-and-place tools read CSV)
-                    out = gdir / f"{name}-CPL-{re.sub(r'[^A-Za-z0-9]+', '_', prof.name).strip('_')}.csv"
+                    # placement files are always CSV (board houses' pick-and-place tools read CSV), and they
+                    # sit next to the BOM: both are uploaded in the assembly step, not with the Gerbers
+                    out = build / f"{name}-CPL-{re.sub(r'[^A-Za-z0-9]+', '_', prof.name).strip('_')}.csv"
                     res.files.append(bom.write_table(bom.cpl_rows(places, cpl_fmt, dnp), out, "CPL"))
                 except Exception as e:  # noqa: BLE001
                     res.warnings.append(f"Placement export failed: {e}")
