@@ -188,7 +188,7 @@ class FabOptions:
     gerbers: bool = True
     drill: bool = True
     placement: bool = True
-    make_zip: bool = True
+    make_zip: bool = False  # the production zip is made by its own button, not with the Build folder
     boards: int = 1
     file_type: str = "csv"
 

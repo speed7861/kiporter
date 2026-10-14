@@ -21,8 +21,7 @@ class FabTab(ttk.Frame):
              ("bom", "BOM in the shop's format"),
              ("gerbers", "Gerbers (all copper, mask, paste, silkscreen and outline layers)"),
              ("drill", "Drill files (Excellon) + drill map"),
-             ("placement", "Placement / pick-and-place (CPL) file"),
-             ("make_zip", "Zip the whole Build folder (PDF, BOM, reports and Gerbers) into the project folder")]
+             ("placement", "Placement / pick-and-place (CPL) file")]
 
     def __init__(self, parent, app: "App"):
         super().__init__(parent, padding=10)
