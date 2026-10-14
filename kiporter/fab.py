@@ -332,7 +332,8 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
                     places = bom.read_positions(work_pcb.with_suffix(".kicad_pro"), ki)
                     dnp = {r for l in (lines or []) if l.dnp for r in l.refs} if not settings.bom_include_dnp else set()
                     cpl_fmt = fmt.cpl or "Generic"
-                    out = gdir / f"{name}-CPL-{re.sub(r'[^A-Za-z0-9]+', '_', prof.name).strip('_')}.{opts.file_type}"
+                    # placement files are always CSV (board houses' pick-and-place tools read CSV)
+                    out = gdir / f"{name}-CPL-{re.sub(r'[^A-Za-z0-9]+', '_', prof.name).strip('_')}.csv"
                     res.files.append(bom.write_table(bom.cpl_rows(places, cpl_fmt, dnp), out, "CPL"))
                 except Exception as e:  # noqa: BLE001
                     res.warnings.append(f"Placement export failed: {e}")

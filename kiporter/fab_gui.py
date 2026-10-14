@@ -44,7 +44,8 @@ class FabTab(ttk.Frame):
         self.boards = tk.IntVar(value=s.bom_boards or 1)
         ttk.Spinbox(row, from_=1, to=100000, textvariable=self.boards, width=7).pack(side="left", padx=4)
         self.ftype = tk.StringVar(value=s.bom_file_type)
-        ttk.Radiobutton(row, text="CSV", variable=self.ftype, value="csv").pack(side="left", padx=(10, 0))
+        ttk.Label(row, text="   BOM as:").pack(side="left")
+        ttk.Radiobutton(row, text="CSV", variable=self.ftype, value="csv").pack(side="left", padx=(4, 0))
         ttk.Radiobutton(row, text="Excel", variable=self.ftype, value="xlsx").pack(side="left", padx=4)
         self.notes = tk.StringVar()
         ttk.Label(self, textvariable=self.notes, wraplength=1100, justify="left", style="Muted.TLabel").pack(

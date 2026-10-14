@@ -358,7 +358,7 @@ def export(lines: list[BomLine], fmt: BomFormat, out_dir: Path, base: str, board
     written = [write_table(bom_rows(lines, fmt, boards, include_dnp), out_dir / f"{base}_BOM_{tag}.{file_type}")]
     if places is not None and fmt.cpl:
         dnp_refs = set() if include_dnp else {r for l in lines if l.dnp for r in l.refs}
-        written.append(write_table(cpl_rows(places, fmt.cpl, dnp_refs), out_dir / f"{base}_CPL_{tag}.{file_type}",
+        written.append(write_table(cpl_rows(places, fmt.cpl, dnp_refs), out_dir / f"{base}_CPL_{tag}.csv",  # always CSV
                                    "CPL"))
     return written
 

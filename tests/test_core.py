@@ -553,3 +553,13 @@ def test_production_zip_holds_the_whole_build_folder(tmp_path):
     with zipfile.ZipFile(z) as f:
         assert sorted(f.namelist()) == ["Board Build/Board-BOM.csv", "Board Build/Board.pdf",
                                         "Board Build/Gerbers/Board-F_Cu.gtl"]
+
+
+def test_placement_file_is_always_csv(tmp_path):
+    from kiporter import bom
+    line = bom.BomLine(refs=["R1"], qty=1, value="10k", footprint="R:R_0603", data={"lcsc": "C25804"})
+    place = bom.Placement(ref="R1", value="10k", package="0603", x=1.0, y=2.0, rot=0.0, side="top")
+    files = bom.export([line], bom.FORMATS["JLCPCB"] if isinstance(bom.FORMATS, dict) else next(
+        f for f in bom.FORMATS if f.name == "JLCPCB"), tmp_path, "Board", 1, False, "xlsx", places=[place])
+    names = sorted(f.name for f in files)
+    assert any(n.endswith(".xlsx") and "BOM" in n for n in names) and any("CPL" in n and n.endswith(".csv") for n in names)
