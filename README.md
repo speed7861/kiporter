@@ -117,9 +117,10 @@ automatically.
 1. On the **Fabrication** tab, choose your **Board house**.
 2. Click **Generate Build folder**. Kiporter refills zones and runs DRC on a copy of the
    board (your file isn't changed). It then writes the schematic PDF, BOM, Gerbers, drill
-   files, pick-and-place file and an upload ZIP into `<Project> Build` next to your project.
+   files and pick-and-place file into `<Project> Build` next to your project, and zips the
+   whole folder into `<Project> Build.zip` in the project folder.
 3. Read the **Check before ordering** notes, such as DRC errors or missing part numbers,
-   then upload the ZIP to the board house.
+   then send the ZIP to the board house.
 
 Need a different setup? Click **Custom Gerber setup…** to choose the layers and file options yourself.
 
@@ -228,8 +229,9 @@ Click **Save** when you're done.
 One click creates a `<Project> Build` folder containing:
 - the schematic PDF, the BOM and a DRC report;
 - a `Gerbers` sub-folder with Gerbers, drill files and the placement file, set up for the
-  board house you pick;
-- an upload ZIP.
+  board house you pick.
+
+The whole folder is also zipped into `<Project> Build.zip` in the project folder, ready to send.
 
 Zones are refilled and DRC is run on a copy first, so your board file is never changed.
 

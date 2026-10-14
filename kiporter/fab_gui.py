@@ -22,7 +22,7 @@ class FabTab(ttk.Frame):
              ("gerbers", "Gerbers (all copper, mask, paste, silkscreen and outline layers)"),
              ("drill", "Drill files (Excellon) + drill map"),
              ("placement", "Placement / pick-and-place (CPL) file"),
-             ("make_zip", "Zip the Gerbers + drill files for upload")]
+             ("make_zip", "Zip the whole Build folder (PDF, BOM, reports and Gerbers) into the project folder")]
 
     def __init__(self, parent, app: "App"):
         super().__init__(parent, padding=10)
@@ -64,7 +64,7 @@ class FabTab(ttk.Frame):
         self.go_btn = ttk.Button(bf, text="⚙  Generate Build folder", command=self.generate,
                                  style="Accent.TButton")
         self.go_btn.pack(side="left")
-        ttk.Button(bf, text="Create upload zip", command=self.zip_only).pack(side="left", padx=6)
+        ttk.Button(bf, text="Create production zip", command=self.zip_only).pack(side="left", padx=6)
         ttk.Button(bf, text="Open Build folder", command=self.open_folder).pack(side="left")
         self.busy = tk.StringVar()
         ttk.Label(bf, textvariable=self.busy, foreground="#b3261e").pack(side="left", padx=12)
@@ -143,7 +143,7 @@ class FabTab(ttk.Frame):
             if res.drc_summary:
                 lines.append(f"DRC: {res.drc_summary}")
             if res.zip_file:
-                lines.append(f"Upload zip: {res.zip_file.name}")
+                lines.append(f"Production zip: {res.zip_file}")
             lines += ["", "Files:"] + [f"  {f.relative_to(res.build_dir)}" for f in res.files
                                        if f.is_relative_to(res.build_dir)]
             if res.warnings:
@@ -162,13 +162,11 @@ class FabTab(ttk.Frame):
         p = self.app.current_project()
         if not p:
             return
-        gdir = fab.build_dir_for(p.pro_file) / "Gerbers"
-        if not gdir.exists() or not any(gdir.iterdir()):
-            messagebox.showinfo(APP_TITLE, "Generate the Gerbers first.")
+        build = fab.build_dir_for(p.pro_file)
+        if not build.exists() or not any(build.rglob("*.*")):
+            messagebox.showinfo(APP_TITLE, "Generate the fabrication outputs first.")
             return
-        prof = fab.get_profile(self._profile_name(), self.app.settings)
-        z = fab.make_zip(gdir, fab.build_dir_for(p.pro_file) / f"{p.pro_file.stem}-Gerbers-"
-                         f"{prof.name.split()[0]}.zip")
+        z = fab.make_zip(build, fab.zip_path_for(p.pro_file))
         self.app.log(f"Created {z}")
         kicad_control.open_path(z.parent)
 

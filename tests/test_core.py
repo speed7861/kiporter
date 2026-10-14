@@ -535,3 +535,21 @@ def test_bom_value_wins_over_a_wrong_part_number():
     assert w.warning_only and "no 1.94k 0603 part" in w.reason
     odd.alts = {"LCSC": w}
     assert alt.best(odd, 1) is None and alt.best(odd, 1, warnings=True) is w
+
+
+def test_production_zip_holds_the_whole_build_folder(tmp_path):
+    import zipfile
+    from kiporter import fab
+    pro = tmp_path / "Board.kicad_pro"
+    pro.write_text("{}", encoding="utf-8")
+    build = fab.build_dir_for(pro)
+    (build / "Gerbers").mkdir(parents=True)
+    (build / "Board.pdf").write_text("pdf", encoding="utf-8")
+    (build / "Board-BOM.csv").write_text("bom", encoding="utf-8")
+    (build / "Gerbers" / "Board-F_Cu.gtl").write_text("g", encoding="utf-8")
+    (build / "old.zip").write_text("x", encoding="utf-8")
+    z = fab.make_zip(build, fab.zip_path_for(pro))
+    assert z == tmp_path / "Board Build.zip" and z.exists()
+    with zipfile.ZipFile(z) as f:
+        assert sorted(f.namelist()) == ["Board Build/Board-BOM.csv", "Board Build/Board.pdf",
+                                        "Board Build/Gerbers/Board-F_Cu.gtl"]

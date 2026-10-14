@@ -228,12 +228,20 @@ def _work_copy(project_file: Path, td: Path) -> Path:
     return td / project_file.with_suffix(".kicad_pcb").name
 
 
-def make_zip(gerber_dir: Path, zip_path: Path, include_assembly: bool = False) -> Path:
-    exts_skip = set() if include_assembly else {".csv", ".xlsx", ".rpt", ".pdf", ".txt"}
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in sorted(gerber_dir.iterdir()):
-            if f.is_file() and f.suffix.lower() not in exts_skip:
-                z.write(f, f.name)
+def zip_path_for(project_file: Path) -> Path:
+    """The production zip: '<Project> Build.zip', next to the project file."""
+    return project_file.parent / f"{build_dir_for(project_file).name}.zip"
+
+
+def make_zip(build_dir: Path, zip_path: Path) -> Path:
+    """Zip the whole Build folder (schematic PDF, BOM, reports and the Gerbers sub-folder) into one file,
+    keeping the folder layout. Written to a temporary name first, so a failed run never leaves half a zip."""
+    tmp = zip_path.with_name(zip_path.name + ".part")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(build_dir.rglob("*")):
+            if f.is_file() and f.suffix.lower() != ".zip":
+                z.write(f, (Path(build_dir.name) / f.relative_to(build_dir)).as_posix())
+    tmp.replace(zip_path)
     return zip_path
 
 
@@ -333,6 +341,6 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
 
     res.files += [f for f in gdir.iterdir() if f.is_file() and f not in res.files]
     if opts.make_zip and any(gdir.iterdir()):
-        res.zip_file = make_zip(gdir, build / f"{name}-Gerbers-{re.sub(r'[^A-Za-z0-9]+', '_', prof.name).strip('_')}.zip")
-        log(f"Upload zip: {res.zip_file.name}")
+        res.zip_file = make_zip(build, zip_path_for(project_file))
+        log(f"Production zip: {res.zip_file}")
     return res
