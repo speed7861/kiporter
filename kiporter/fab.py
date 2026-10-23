@@ -35,6 +35,7 @@ DEFAULT_LAYERS = ["F.Cu", INNER, "B.Cu", "F.Paste", "B.Paste", "F.Silkscreen", "
 DEFAULT_OPTIONS: dict = {
     "layers": DEFAULT_LAYERS,
     "common_layers": [],  # "Plot on all layers": drawn onto every plotted layer (e.g. Edge.Cuts)
+    "pdf_layers": True,  # also a PDF of every plotted layer, next to the Gerbers
     "board_plot_params": False,  # use the plot settings saved in the board instead of the options below
     "protel_ext": True,  # .gtl/.gbl/... file names (off = KiCad's .gbr names)
     "x2": True,  # Gerber X2 attributes
@@ -146,7 +147,7 @@ PROFILES: list[FabProfile] = [
     FabProfile("Aisler", {"drill_map": "none", "bom_format": "Aisler",
                           "notes": "Aisler also accepts the KiCad project directly.", "url": "https://aisler.net/"}),
     FabProfile("MacroFab", {"drill_map": "none", "bom_format": "MacroFab", "url": "https://macrofab.com/"}),
-    FabProfile("Generic (KiCad defaults)", {"drill_map": "pdf"}),
+    FabProfile("Generic (KiCad defaults)", {"drill_map": "pdf", "common_layers": ["Edge.Cuts"]}),
     FabProfile("Use the board's own plot settings", {
         "board_plot_params": True, "drill_map": "pdf",
         "notes": "Plots exactly what is set in KiCad's PCB Editor → File → Plot dialog (layers and "
@@ -250,6 +251,24 @@ def make_zip(build_dir: Path, zip_path: Path) -> Path:
     return zip_path
 
 
+def _plot_pdfs(ki: KiCadInstall, pcb: Path, out: Path, layers: list[str], common: list[str], prof: FabProfile,
+               res: FabResult, log: Log) -> None:
+    """A PDF of every plotted layer, for checking and printing. The board outline is always drawn on them."""
+    log(f"Plotting PDFs of {len(layers)} layers…")
+    common = list(dict.fromkeys(common + ["Edge.Cuts"]))
+    flags = ["--mode-separate", "--include-border-title"]
+    if prof.opt("subtract_soldermask"):
+        flags.append("--subtract-soldermask")
+    if prof.opt("exclude_refdes"):
+        flags.append("--exclude-refdes")
+    if prof.opt("exclude_value"):
+        flags.append("--exclude-value")
+    r = _run(ki, "pcb", "export", "pdf", pcb, "-o", out, "--layers", ",".join(layers),
+             "--common-layers", ",".join(common), *flags)
+    if r.returncode != 0:
+        res.warnings.append(f"PDF plot failed: {(r.stderr or r.stdout).strip()[:300]}")
+
+
 def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: FabOptions,
              log: Log = print) -> FabResult:
     prof = get_profile(opts.profile, settings)
@@ -315,18 +334,20 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
         if work_pcb and (opts.gerbers or opts.drill or opts.placement):
             text = work_pcb.read_text(encoding="utf-8", errors="replace")
             layers = prof.layers(text)
+            common = prof.common_layers(text)
 
             # 4) Gerbers
             if opts.gerbers:
                 log(f"Plotting Gerbers for {prof.name} ({len(layers)} layers)…")
                 layer_args = [] if prof.opt("board_plot_params") else ["--layers", ",".join(layers)]
-                common = prof.common_layers(text)
                 if common and not prof.opt("board_plot_params"):
                     layer_args += ["--common-layers", ",".join(common)]
                 r = _run(ki, "pcb", "export", "gerbers", work_pcb, "-o", gdir, *layer_args, "--check-zones",
                          *prof.gerber_flags)
                 if r.returncode != 0:
                     res.warnings.append(f"Gerber export failed: {(r.stderr or r.stdout).strip()[:300]}")
+                if prof.opt("pdf_layers"):
+                    _plot_pdfs(ki, work_pcb, gdir, layers, common, prof, res, log)
             # 5) drill
             if opts.drill:
                 log("Writing drill files…")

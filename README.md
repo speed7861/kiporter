@@ -228,7 +228,8 @@ Click **Save** when you're done.
 ### Fabrication
 One click creates a `<Project> Build` folder containing:
 - the schematic PDF, the BOM, the placement (CPL) file and a DRC report;
-- a `Gerbers` sub-folder with Gerbers and drill files, set up for the board house you pick.
+- a `Gerbers` sub-folder with Gerbers and drill files, set up for the board house you pick,
+  plus a PDF of every layer (with the board outline drawn on each) for checking and printing.
 
 **Create production zip** zips the whole folder into `<Project> Build.zip` in the project folder,
 ready to send.

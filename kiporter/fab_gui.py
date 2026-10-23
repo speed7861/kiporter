@@ -182,7 +182,8 @@ class FabProfileEditor(tk.Toplevel):
                     ("disable_aperture_macros", "Disable aperture macros"),
                     ("use_drill_origin", "Use the drill/place file origin"),
                     ("exclude_refdes", "Leave out reference designators"),
-                    ("exclude_value", "Leave out values")]
+                    ("exclude_value", "Leave out values"),
+                    ("pdf_layers", "Also plot a PDF of every layer, next to the Gerbers (outline drawn on each)")]
     DRILL_CHOICES = [("drill_format", "Drill file format", ["excellon", "gerber"]),
                      ("drill_units", "Units (Excellon)", ["mm", "in"]),
                      ("drill_zeros", "Zeros (Excellon)", ["decimal", "suppressleading", "suppresstrailing", "keep"]),

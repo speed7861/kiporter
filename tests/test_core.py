@@ -571,3 +571,6 @@ def test_plot_on_all_layers_option():
     pcb = '(kicad_pcb (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal)))'
     assert prof.common_layers(pcb)[0] == "Edge.Cuts" and "In1.Cu" in prof.common_layers(pcb)
     assert fab.FabProfile("JLCPCB").common_layers(pcb) == []
+    generic = fab.get_profile("Generic (KiCad defaults)", None)
+    assert generic.common_layers(pcb) == ["Edge.Cuts"] and generic.opt("pdf_layers")
+    assert fab.get_profile("JLCPCB", None).common_layers(pcb) == []  # board-house presets keep their own setup
