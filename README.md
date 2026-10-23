@@ -235,7 +235,7 @@ ready to send.
 
 Zones are refilled and DRC is run on a copy first, so your board file is never changed.
 
-If no preset fits, make a **custom Gerber setup**. You choose the layers, Gerber options (Protel extensions, X2, netlist attributes, soldermask subtraction, precision), drill options (format, units, zeros, origin, separate PTH/NPTH, drill map) and the BOM format. You can also use the plot settings saved in the board.
+If no preset fits, make a **custom Gerber setup**. You choose the layers, which layers to plot on all layers (such as Edge.Cuts), Gerber options (Protel extensions, X2, netlist attributes, soldermask subtraction, precision), drill options (format, units, zeros, origin, separate PTH/NPTH, drill map) and the BOM format. You can also use the plot settings saved in the board.
 
 ### Library Tools
 - **Clean up & auto-link:** links symbols to footprints and footprints to 3D models, repairs
