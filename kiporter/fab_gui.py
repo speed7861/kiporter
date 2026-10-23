@@ -214,14 +214,26 @@ class FabProfileEditor(tk.Toplevel):
 
         cols = ttk.Frame(frm)
         cols.pack(fill="both", expand=True, pady=8)
-        lay = ttk.LabelFrame(cols, text="Layers to plot", padding=8)
-        lay.pack(side="left", fill="y", padx=(0, 8))
+        left = ttk.Frame(cols)
+        left.pack(side="left", fill="y", padx=(0, 8))
+        lay = ttk.LabelFrame(left, text="Layers to plot", padding=8)
+        lay.pack(fill="x")
         self.layer_vars: dict[str, tk.BooleanVar] = {}
         for i, layer in enumerate(fab.ALL_LAYERS):
             v = tk.BooleanVar()
             self.layer_vars[layer] = v
             text = "All inner copper (In1.Cu …)" if layer == fab.INNER else layer
             ttk.Checkbutton(lay, text=text, variable=v).grid(row=i % 11, column=i // 11, sticky="w", padx=4)
+        com = ttk.LabelFrame(left, text="Plot on all layers", padding=8)
+        com.pack(fill="x", pady=(8, 0))
+        ttk.Label(com, text="Drawn onto every layer above, as in KiCad's plot dialog (often Edge.Cuts).",
+                  style="Muted.TLabel", wraplength=330, justify="left").grid(row=0, column=0, columnspan=3, sticky="w")
+        self.common_vars: dict[str, tk.BooleanVar] = {}
+        for i, layer in enumerate(fab.ALL_LAYERS):
+            v = tk.BooleanVar()
+            self.common_vars[layer] = v
+            text = "Inner copper" if layer == fab.INNER else layer
+            ttk.Checkbutton(com, text=text, variable=v).grid(row=1 + i // 3, column=i % 3, sticky="w", padx=4)
         right = ttk.Frame(cols)
         right.pack(side="left", fill="both", expand=True)
         gb = ttk.LabelFrame(right, text="Gerber options", padding=8)
@@ -275,6 +287,9 @@ class FabProfileEditor(tk.Toplevel):
         layers = prof.opt("layers")
         for layer, v in self.layer_vars.items():
             v.set(layer in layers)
+        common = prof.opt("common_layers")
+        for layer, v in self.common_vars.items():
+            v.set(layer in common)
         for key, v in self.vars.items():
             val = prof.opt(key)
             if key == "bom_format":
@@ -297,7 +312,8 @@ class FabProfileEditor(tk.Toplevel):
         if not layers and not self.vars["board_plot_params"].get():
             messagebox.showwarning(APP_TITLE, "Select at least one layer.", parent=self)
             return
-        opts: dict = {"layers": layers}
+        opts: dict = {"layers": layers,
+                      "common_layers": [layer for layer in fab.ALL_LAYERS if self.common_vars[layer].get()]}
         for key, v in self.vars.items():
             val = v.get()
             if key == "bom_format":

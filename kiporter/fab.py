@@ -34,6 +34,7 @@ DEFAULT_LAYERS = ["F.Cu", INNER, "B.Cu", "F.Paste", "B.Paste", "F.Silkscreen", "
 # Every option a profile can set. Built-in profiles override a few; custom profiles store all of them.
 DEFAULT_OPTIONS: dict = {
     "layers": DEFAULT_LAYERS,
+    "common_layers": [],  # "Plot on all layers": drawn onto every plotted layer (e.g. Edge.Cuts)
     "board_plot_params": False,  # use the plot settings saved in the board instead of the options below
     "protel_ext": True,  # .gtl/.gbl/... file names (off = KiCad's .gbr names)
     "x2": True,  # Gerber X2 attributes
@@ -78,11 +79,15 @@ class FabProfile:
     def url(self) -> str:
         return self.opt("url")
 
-    def layers(self, pcb_text: str) -> list[str]:
+    def layers(self, pcb_text: str, key: str = "layers") -> list[str]:
         out: list[str] = []
-        for l in self.opt("layers"):
+        for l in self.opt(key):
             out += inner_layers(pcb_text) if l == INNER else [l]
         return list(dict.fromkeys(out))
+
+    def common_layers(self, pcb_text: str) -> list[str]:
+        """Layers drawn onto every plotted layer (KiCad's 'Plot on all layers')."""
+        return self.layers(pcb_text, "common_layers")
 
     @property
     def gerber_flags(self) -> list[str]:
@@ -315,6 +320,9 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
             if opts.gerbers:
                 log(f"Plotting Gerbers for {prof.name} ({len(layers)} layers)…")
                 layer_args = [] if prof.opt("board_plot_params") else ["--layers", ",".join(layers)]
+                common = prof.common_layers(text)
+                if common and not prof.opt("board_plot_params"):
+                    layer_args += ["--common-layers", ",".join(common)]
                 r = _run(ki, "pcb", "export", "gerbers", work_pcb, "-o", gdir, *layer_args, "--check-zones",
                          *prof.gerber_flags)
                 if r.returncode != 0:

@@ -563,3 +563,11 @@ def test_placement_file_is_always_csv(tmp_path):
         f for f in bom.FORMATS if f.name == "JLCPCB"), tmp_path, "Board", 1, False, "xlsx", places=[place])
     names = sorted(f.name for f in files)
     assert any(n.endswith(".xlsx") and "BOM" in n for n in names) and any("CPL" in n and n.endswith(".csv") for n in names)
+
+
+def test_plot_on_all_layers_option():
+    from kiporter import fab
+    prof = fab.FabProfile("Mine", {"common_layers": ["Edge.Cuts", fab.INNER]}, custom=True)
+    pcb = '(kicad_pcb (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal)))'
+    assert prof.common_layers(pcb)[0] == "Edge.Cuts" and "In1.Cu" in prof.common_layers(pcb)
+    assert fab.FabProfile("JLCPCB").common_layers(pcb) == []
