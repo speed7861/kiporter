@@ -10,7 +10,6 @@ library: through an MCP form (elicitation) when the client supports one, otherwi
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from typing import Any, Literal
 
 import anyio.to_thread
@@ -19,7 +18,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field, create_model
 
-from . import __version__, cli, library
+from . import __version__, cli
+from .cli import LibOption, library_options
 
 INSTRUCTIONS = """Kiporter searches electronic parts at LCSC, Digi-Key, Mouser, Farnell/Newark, TME and Octopart,
 and imports their KiCad symbol, footprint and 3D model into the user's libraries. It also reads BOMs,
@@ -79,40 +79,6 @@ def _opt(argv: list[str], flag: str, value) -> None:
 
 
 # ================================================================ library confirmation
-@dataclass
-class LibOption:
-    label: str
-    kind: str  # project | global
-    name: str
-    exists: bool
-
-
-def library_options(ctx: cli.Ctx, project: str | None, wanted_kind: str | None, wanted_name: str | None
-                    ) -> tuple[list[LibOption], str | None]:
-    """Every library the part could go to (project ones first), plus the project's name if there is one."""
-    pro = ctx.project(project, required=False)
-    pdir = pro.parent if pro else None
-    opts: list[LibOption] = []
-    for kind in ("project", "global"):
-        for t in library.list_targets(ctx.settings, ctx.ki, pdir, kind):
-            where = f"in project {pro.stem}, travels with it" if kind == "project" else "shared by all projects"
-            new = "" if t.sym_file.exists() else ", new"
-            opts.append(LibOption(f"{'Project' if kind == 'project' else 'Local'} library '{t.name}' ({where}{new})",
-                                  kind, t.name, t.sym_file.exists()))
-    if wanted_kind and wanted_name and (wanted_kind != "project" or pdir) and \
-            not any(o.kind == wanted_kind and o.name.lower() == wanted_name.lower() for o in opts):
-        word = "project" if wanted_kind == "project" else "local"
-        opts.append(LibOption(f"New {word} library '{wanted_name}'", wanted_kind, wanted_name, False))
-    return opts, (pro.stem if pro else None)
-
-
-def _suggested(opts: list[LibOption], kind: str | None, name: str | None, default_kind: str) -> LibOption:
-    for o in opts:
-        if kind and o.kind == kind and (not name or o.name.lower() == name.lower()):
-            return o
-    return next((o for o in opts if o.kind == (kind or default_kind)), opts[0])
-
-
 def _can_elicit(ctx: Context | None) -> bool:
     try:
         caps = ctx.client_capabilities if ctx is not None else None
@@ -150,8 +116,7 @@ async def _choose_target(ctx: Context | None, kctx: cli.Ctx, what: str, destinat
     opts, pname = await _thread(library_options, kctx, project, kind, library_name)
     if not opts:
         raise ToolError("No library to import into.")
-    default_kind = "project" if pname and kctx.settings.default_target == "project" else "global"
-    suggested = _suggested(opts, kind, library_name, default_kind)
+    suggested = cli.suggested_option(kctx, opts, pname, kind, library_name)
     choice = await confirm_library(ctx, what, opts, suggested, pname)
     if choice == "cancel":
         return None, {"cancelled": True, "message": "The user cancelled the import. Nothing was changed."}
@@ -162,18 +127,15 @@ async def _choose_target(ctx: Context | None, kctx: cli.Ctx, what: str, destinat
         if kind == "project" and not pname:
             raise ToolError("No KiCad project found for a project library: open it in KiCad or pass `project`.")
         if not library_name:  # the default library of the chosen kind
-            return _suggested(opts, kind, None, default_kind), None
+            return cli.suggested_option(kctx, opts, pname, kind), None
         match = next((o for o in opts if o.kind == kind and o.name.lower() == library_name.lower()), None)
         return match or LibOption("", kind, library_name, False), None
     return None, {
         "needs_confirmation": True,
-        "question": f"Import {what} into the project library{f' of {pname}' if pname else ''} (stored in the "
-                    "project folder, travels with the project) or into a local library (shared by all your "
-                    "projects)?",
-        "options": [{"destination": "project" if o.kind == "project" else "local", "library": o.name,
-                     "label": o.label, "exists": o.exists} for o in opts],
-        "suggested": {"destination": "project" if suggested.kind == "project" else "local",
-                      "library": suggested.name},
+        "question": cli.library_question(what, pname),
+        "options": [{"destination": o.destination, "library": o.name, "label": o.label, "exists": o.exists}
+                    for o in opts],
+        "suggested": {"destination": suggested.destination, "library": suggested.name},
         "next_step": "Ask the user this question and wait for the answer. Then call this tool again with "
                      "destination and library set to their choice and user_confirmed=true. Do not choose for them.",
     }

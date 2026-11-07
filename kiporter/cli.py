@@ -143,7 +143,7 @@ class Ctx:
 
     # ---- libraries
     def target(self, into: str | None, lib: str | None, project: str | None) -> library.LibraryTarget:
-        kind = into or self.settings.default_target or "project"
+        kind = {"local": "global"}.get(into or "", into) or self.settings.default_target or "project"
         pro = self.project(project, required=(kind == "project"))
         pdir = pro.parent if pro else None
         libs = library.list_targets(self.settings, self.ki, pdir, kind)
@@ -286,8 +286,10 @@ def _import_text(out: dict) -> str:
 
 def cmd_import(ctx: Ctx) -> dict:
     a = ctx.args
-    target = ctx.target(a.into, a.lib, a.project)
+    if a.into:  # fail fast on a missing project before searching
+        ctx.target(a.into, a.lib, a.project)
     r = resolve_part(ctx, a.query, a.source, a.first)
+    target = choose_target(ctx, f"{r.mpn} ({r.manufacturer}, {r.source} {r.supplier_pn})".replace(", )", ")"))
     return import_part(ctx, r, target, a.cad_source)
 
 
@@ -323,13 +325,102 @@ def cmd_import_zip(ctx: Ctx) -> dict:
     z = Path(a.zip).expanduser().resolve()
     if not z.exists():
         raise CliError(f"File not found: {z}")
-    target = ctx.target(a.into, a.lib, a.project)
+    target = choose_target(ctx, z.name + (f" ({a.mpn})" if a.mpn else ""))
     data = {k: v for k, v in (("mpn", a.mpn), ("manufacturer", a.manufacturer), ("lcsc", a.lcsc)) if v}
     from . import symstyle
     staged = symstyle.restyle_part(importers.stage_zip(z, ctx.ki, data), ctx.settings.symbol_style)
     out = install_result(library.install(target, staged, **_install_opts(ctx)), target)
     out["_text"] = _import_text(out)
     return out
+
+
+# ================================================================ choosing the library (project or local)
+@dataclasses.dataclass
+class LibOption:
+    label: str
+    kind: str  # project | global
+    name: str
+    exists: bool
+
+    @property
+    def destination(self) -> str:
+        return "project" if self.kind == "project" else "local"
+
+
+def library_options(ctx: Ctx, project: str | None, wanted_kind: str | None = None, wanted_name: str | None = None
+                    ) -> tuple[list[LibOption], str | None]:
+    """Every library a part could go to (project ones first), plus the project's name if there is one."""
+    pro = ctx.project(project, required=False)
+    pdir = pro.parent if pro else None
+    opts: list[LibOption] = []
+    for kind in ("project", "global"):
+        for t in library.list_targets(ctx.settings, ctx.ki, pdir, kind):
+            where = f"in project {pro.stem}, travels with it" if kind == "project" else "shared by all projects"
+            new = "" if t.sym_file.exists() else ", new"
+            opts.append(LibOption(f"{'Project' if kind == 'project' else 'Local'} library '{t.name}' ({where}{new})",
+                                  kind, t.name, t.sym_file.exists()))
+    if wanted_kind and wanted_name and (wanted_kind != "project" or pdir) and \
+            not any(o.kind == wanted_kind and o.name.lower() == wanted_name.lower() for o in opts):
+        word = "project" if wanted_kind == "project" else "local"
+        opts.append(LibOption(f"New {word} library '{wanted_name}'", wanted_kind, wanted_name, False))
+    return opts, (pro.stem if pro else None)
+
+
+def suggested_option(ctx: Ctx, opts: list[LibOption], pname: str | None, kind: str | None = None,
+                     name: str | None = None) -> LibOption:
+    """The answer to pre-select: what was asked for, else the GUI's default (project / local)."""
+    for o in opts:
+        if kind and o.kind == kind and (not name or o.name.lower() == name.lower()):
+            return o
+    default_kind = kind or ("project" if pname and ctx.settings.default_target == "project" else "global")
+    return next((o for o in opts if o.kind == default_kind), opts[0])
+
+
+def library_question(what: str, pname: str | None) -> str:
+    return (f"Import {what} into the project library{f' of {pname}' if pname else ''} (stored in the project "
+            "folder, travels with the project) or into a local library (shared by all your projects)?")
+
+
+def choose_target(ctx: Ctx, what: str) -> library.LibraryTarget:
+    """The library to import into. --into decides; otherwise the user is asked in the terminal. When nobody
+    can be asked (no terminal, --json: a script or an agent), nothing is imported and the options are
+    returned, so the caller asks the user and runs again with --into."""
+    a = ctx.args
+    if a.into:
+        return ctx.target(a.into, a.lib, a.project)
+    opts, pname = library_options(ctx, a.project)
+    if not opts:
+        raise CliError("No library to import into: pass --project PATH or --into local.", EXIT_USAGE)
+    if a.lib:  # a library named on its own is enough when only one library has that name
+        same = [o for o in opts if o.name.lower() == a.lib.lower()]
+        if len(same) == 1:
+            return ctx.target(same[0].kind, same[0].name, a.project)
+    sugg = suggested_option(ctx, opts, pname)
+    question = library_question(what, pname)
+    if a.json or not (sys.stdin.isatty() and sys.stderr.isatty()):
+        raise CliError(f"{question} Nothing was imported: ask the user, then run again with --into project or "
+                       "--into local (and --lib NAME for a specific library).", EXIT_CHOICE,
+                       needs_confirmation=True, question=question,
+                       options=[{"destination": o.destination, "library": o.name, "label": o.label,
+                                 "exists": o.exists} for o in opts],
+                       suggested={"destination": sugg.destination, "library": sugg.name})
+    log(question)
+    for i, o in enumerate(opts, 1):
+        log(f"  {i}) {o.label}{'   <- default' if o is sugg else ''}")
+    while True:
+        sys.stderr.write(f"Choose 1-{len(opts)} (Enter = {opts.index(sugg) + 1}, q = cancel): ")
+        sys.stderr.flush()
+        ans = sys.stdin.readline()
+        if not ans or ans.strip().lower() in ("q", "quit", "n", "no"):
+            raise CliError("Cancelled. Nothing was imported.")
+        ans = ans.strip()
+        if not ans:
+            pick = sugg
+            break
+        if ans.isdigit() and 1 <= int(ans) <= len(opts):
+            pick = opts[int(ans) - 1]
+            break
+    return ctx.target(pick.kind, pick.name, a.project)
 
 
 # ================================================================ projects & libraries
@@ -491,8 +582,9 @@ def cmd_update_pcb(ctx: Ctx) -> dict:
 
 # ================================================================ argument parsing
 def _add_target_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--into", choices=["project", "global"], help="project or local (global) library "
-                                                                  "(default: the GUI's choice)")
+    p.add_argument("--into", choices=["project", "local", "global"],
+                   help="project library or local library (global = local). Without it you are asked; "
+                        "when nobody can be asked (no terminal, --json) nothing is imported (exit 3)")
     p.add_argument("--lib", help="library nickname (created and registered if it does not exist)")
     p.add_argument("--project", help="KiCad project (.kicad_pro or its folder); default: the one open in KiCad")
     p.add_argument("--overwrite", action="store_true", help="replace parts that already exist")
@@ -613,6 +705,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(_jsonable(out), indent=2, ensure_ascii=False, default=str))
     elif "error" in out:
         log(f"Error: {out['error']}")
+        for o in out.get("options", []):
+            log(f"  --into {o['destination']:7} --lib {o['library']:20} {o['label']}")
         for c in out.get("candidates", []):
             log(f"  {c['source']:9} {c['mpn']:24} {c['manufacturer'][:20]:20} {c['supplier_pn']}")
         if out.get("url"):

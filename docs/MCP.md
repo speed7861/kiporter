@@ -129,5 +129,5 @@ project (project library) once so KiCad loads it.
   after any configuration change.
 - **A supplier is missing from searches:** connect it in the Kiporter app under
   **Settings → Suppliers**. `list_formats` shows which suppliers are connected.
-- **Without MCP:** the same jobs are available as a command line (`kiporter --help`). See
+- **Without MCP:** the same jobs are available as a command line (`kiporter --help`), which also asks project or local before importing. See
   *Command line* in the [README](../README.md).

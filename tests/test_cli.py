@@ -80,3 +80,64 @@ def test_json_error_and_exit_code(capsys):
 def test_table_keeps_last_column_whole():
     long = "x" * 120
     assert long in cli._table([["a", long]], ["A", "Path"])
+
+
+# ---------------------------------------------------------------- project or local library
+OPTS = [cli.LibOption("Project library 'Project_Parts' (in project demo)", "project", "Project_Parts", True),
+        cli.LibOption("Local library 'Kiporter' (shared by all projects)", "global", "Kiporter", True)]
+
+
+class FakeTTY:
+    def __init__(self, answers=""):
+        self.lines = answers.splitlines(keepends=True)
+
+    def isatty(self):
+        return True
+
+    def readline(self):
+        return self.lines.pop(0) if self.lines else ""
+
+    def write(self, s):
+        pass
+
+    def flush(self):
+        pass
+
+
+@pytest.fixture
+def import_ctx(monkeypatch):
+    def make(*argv):
+        ctx = cli.Ctx(cli.build_parser().parse_args(["import", "C7950", *argv]))
+        ctx.settings.default_target = "project"
+        monkeypatch.setattr(cli, "library_options", lambda *a: (list(OPTS), "demo"))
+        ctx.target = lambda kind, name, project: ({"local": "global"}.get(kind, kind), name)
+        return ctx
+    return make
+
+
+def test_import_without_a_terminal_asks_instead_of_guessing(import_ctx):
+    with pytest.raises(cli.CliError) as e:
+        cli.choose_target(import_ctx("--json"), "LM358")
+    assert e.value.code == cli.EXIT_CHOICE and e.value.data["needs_confirmation"]
+    assert [o["destination"] for o in e.value.data["options"]] == ["project", "local"]
+    assert e.value.data["suggested"] == {"destination": "project", "library": "Project_Parts"}
+
+
+def test_into_and_unique_lib_need_no_question(import_ctx):
+    assert cli.choose_target(import_ctx("--into", "local"), "x") == ("global", None)
+    assert cli.choose_target(import_ctx("--lib", "kiporter"), "x") == ("global", "Kiporter")
+
+
+@pytest.mark.parametrize("typed, expected", [("2\n", ("global", "Kiporter")), ("\n", ("project", "Project_Parts")),
+                                             ("9\nx\n1\n", ("project", "Project_Parts"))])
+def test_terminal_prompt(import_ctx, monkeypatch, typed, expected):
+    monkeypatch.setattr(cli.sys, "stdin", FakeTTY(typed))
+    monkeypatch.setattr(cli.sys, "stderr", FakeTTY())
+    assert cli.choose_target(import_ctx(), "LM358") == expected
+
+
+def test_terminal_prompt_cancel(import_ctx, monkeypatch):
+    monkeypatch.setattr(cli.sys, "stdin", FakeTTY("q\n"))
+    monkeypatch.setattr(cli.sys, "stderr", FakeTTY())
+    with pytest.raises(cli.CliError, match="Cancelled"):
+        cli.choose_target(import_ctx(), "LM358")

@@ -162,8 +162,9 @@ settings, API keys and libraries as the app.
 ```
 kiporter search "LM358" --source LCSC --cad      # search suppliers (--cad: check symbol/footprint/3D)
 kiporter cad C7950                               # CAD models available for one part
-kiporter import C7950 --into project             # import an LCSC number or exact MPN
-kiporter import LM358DR --into global --lib MyParts
+kiporter import C7950                            # import an LCSC number or exact MPN (asks where)
+kiporter import C7950 --into project             # straight into the project library
+kiporter import LM358DR --into local --lib MyParts
 kiporter import-zip Downloads/ul_LM358.zip --mpn LM358DR
 kiporter projects                                # KiCad projects, open ones first
 kiporter libraries                               # where parts can be imported to
@@ -177,16 +178,34 @@ kiporter update-pcb                              # Update PCB from Schematic in 
 Add `--json` to any command for machine-readable output on stdout (progress goes to stderr).
 Commands that need a project use the one open in KiCad unless you pass `--project PATH`.
 `import` only takes an exact part number or LCSC number; when the query matches several
-parts it changes nothing and lists the candidates. Exit codes: `0` done, `1` failed,
-`2` bad arguments, `3` needs a choice (several candidates, or a model that only downloads in
-a browser).
+parts it changes nothing and lists the candidates.
+
+**Project or local library.** `import` and `import-zip` never pick the library for you. Give
+`--into project` or `--into local` (optionally with `--lib NAME`), or leave it out and Kiporter
+asks in the terminal:
+
+```
+Import LM358DR2G (onsemi, LCSC C7950) into the project library of MyBoard (stored in the
+project folder, travels with the project) or into a local library (shared by all your projects)?
+  1) Project library 'Project_Parts' (in project MyBoard, travels with it)   <- default
+  2) Local library 'Kiporter' (shared by all projects)
+Choose 1-2 (Enter = 1, q = cancel):
+```
+
+When nobody can answer (a script, an AI agent, or `--json`), nothing is imported. Kiporter
+prints the question and the options instead and exits with code `3`, so the caller can ask
+you and run the command again with `--into`.
+
+Exit codes: `0` done, `1` failed or cancelled, `2` bad arguments, `3` needs a choice (project or
+local library, several matching parts, or a model that only downloads in a browser).
 
 ### MCP server (Claude Code, Claude Desktop and other AI apps)
 
 Kiporter can also run as an MCP server (`kiporter mcp`), so AI apps get its search, import,
 BOM and fabrication jobs as built-in tools. When the AI imports a part, Kiporter always asks
-**you** whether it goes into the project library or a local library. The AI can't choose for
-you. Setup takes two commands; see **[docs/MCP.md](docs/MCP.md)**.
+**you** whether it goes into the project library or a local library, just like the command
+line. The AI can't choose for you. Setup takes two commands; see
+**[docs/MCP.md](docs/MCP.md)**.
 
 ## Features
 
