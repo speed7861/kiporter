@@ -19,11 +19,17 @@ dependencies = [
     "openpyxl>=3.1",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=2,<3"]  # the MCP server (kiporter mcp), Python 3.10+
+
 [project.urls]
 Homepage = "https://github.com/speed7861/kiporter"
 
 [project.gui-scripts]
 kiporter = "kiporter.gui:main"
+
+[project.scripts]
+kiporter-cli = "kiporter.cli:main"
 
 [tool.setuptools]
 packages = ["kiporter"]

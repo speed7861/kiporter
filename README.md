@@ -149,6 +149,45 @@ Everything is under **Settings**:
 
 Click **Save** when you're done.
 
+### Command line (for scripts and AI agents)
+
+Everything above also works without the window, so scripts and AI coding agents such as
+Claude Code can search, import and export without clicking through the GUI. It uses the same
+settings, API keys and libraries as the app.
+
+- **Windows:** run `kiporter.cmd` from the Kiporter folder (or add that folder to your `PATH`).
+- **macOS / Linux:** the installer's `kiporter` command; with arguments it runs the command line.
+- **Anywhere:** `python -m kiporter <command>` from the Kiporter folder.
+
+```
+kiporter search "LM358" --source LCSC --cad      # search suppliers (--cad: check symbol/footprint/3D)
+kiporter cad C7950                               # CAD models available for one part
+kiporter import C7950 --into project             # import an LCSC number or exact MPN
+kiporter import LM358DR --into global --lib MyParts
+kiporter import-zip Downloads/ul_LM358.zip --mpn LM358DR
+kiporter projects                                # KiCad projects, open ones first
+kiporter libraries                               # where parts can be imported to
+kiporter bom --stock --boards 5                  # BOM with stock status
+kiporter bom-export --format JLCPCB --out out/   # BOM + CPL for a board house
+kiporter fab --profile JLCPCB --zip              # Build folder (Gerbers, drill, BOM, CPL, PDF, DRC)
+kiporter formats                                 # BOM formats, board houses, suppliers
+kiporter update-pcb                              # Update PCB from Schematic in the open KiCad
+```
+
+Add `--json` to any command for machine-readable output on stdout (progress goes to stderr).
+Commands that need a project use the one open in KiCad unless you pass `--project PATH`.
+`import` only takes an exact part number or LCSC number; when the query matches several
+parts it changes nothing and lists the candidates. Exit codes: `0` done, `1` failed,
+`2` bad arguments, `3` needs a choice (several candidates, or a model that only downloads in
+a browser).
+
+### MCP server (Claude Code, Claude Desktop and other AI apps)
+
+Kiporter can also run as an MCP server (`kiporter mcp`), so AI apps get its search, import,
+BOM and fabrication jobs as built-in tools. When the AI imports a part, Kiporter always asks
+**you** whether it goes into the project library or a local library. The AI can't choose for
+you. Setup takes two commands; see **[docs/MCP.md](docs/MCP.md)**.
+
 ## Features
 
 ### Search & Import

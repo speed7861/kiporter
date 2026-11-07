@@ -5,6 +5,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+if len(sys.argv) > 1:  # arguments: the command line (`kiporter search LM358 --json`), no window
+    from kiporter.cli import main as cli_main
+    sys.exit(cli_main())
+
 try:
     from kiporter.gui import main
     main()
