@@ -43,21 +43,12 @@ class FabTab(ttk.Frame):
         ttk.Label(row, text="   Boards:").pack(side="left")
         self.boards = tk.IntVar(value=s.bom_boards or 1)
         ttk.Spinbox(row, from_=1, to=100000, textvariable=self.boards, width=7).pack(side="left", padx=4)
-        brow = ttk.Frame(self)
-        # board-house formats: CSV or Excel; KiCad presets: KiCad's own output format (shown instead)
+        # CSV / Excel only applies to Kiporter's board-house formats (a KiCad preset is written as set up)
         self.ftype = tk.StringVar(value=s.bom_file_type)
-        self.ftype_box = ttk.Frame(brow)
+        self.ftype_box = ttk.Frame(row)
         ttk.Label(self.ftype_box, text="   BOM as:").pack(side="left")
         ttk.Radiobutton(self.ftype_box, text="CSV", variable=self.ftype, value="csv").pack(side="left", padx=(4, 0))
         ttk.Radiobutton(self.ftype_box, text="Excel", variable=self.ftype, value="xlsx").pack(side="left", padx=4)
-        brow.pack(fill="x", pady=(6, 0))
-        ttk.Label(brow, text="BOM format:").pack(side="left")
-        self.bom_fmt = ttk.Combobox(brow, state="readonly", width=58, height=30)
-        self.bom_fmt.pack(side="left", padx=6)
-        self.bom_fmt.bind("<<ComboboxSelected>>", lambda e: self._bom_changed())
-        self.kfmt_label = ttk.Label(brow, text="   KiCad output format:")
-        self.kfmt = ttk.Combobox(brow, state="readonly", width=34)
-        self.kfmt.bind("<<ComboboxSelected>>", lambda e: self._bom_changed())
         self.notes = tk.StringVar()
         ttk.Label(self, textvariable=self.notes, wraplength=1100, justify="left", style="Muted.TLabel").pack(
             fill="x", pady=(6, 4))
@@ -72,11 +63,6 @@ class FabTab(ttk.Frame):
             cb.pack(anchor="w", padx=(28 if key == "drc_report" else 8, 8), pady=1)
             if key == "drc_report":
                 self.drc_report_cb = cb
-            if key == "gerbers":
-                # per-build override of the board setup's option; reset when the board house changes
-                self.sub_mask = tk.BooleanVar()
-                self.sub_mask_cb = ttk.Checkbutton(box, text="Subtract soldermask from silkscreen", variable=self.sub_mask)
-                self.sub_mask_cb.pack(anchor="w", padx=(28, 8), pady=1)
         self._steps_changed(save=False)
 
         bf = ttk.Frame(self)
@@ -107,74 +93,26 @@ class FabTab(ttk.Frame):
     def edit_profile(self) -> None:
         FabProfileEditor(self, self._profile_name())
 
-    SHOP_BOM = "Board house format (from the board setup)"
-
     def refresh(self) -> None:
         p = self.app.current_project()
         self.project_info.set(f"Project: {p.pro_file}   →   output: {fab.build_dir_for(p.pro_file)}" if p
                               else "Select a project at the top of the window.")
-        self._fill_bom_formats()
-
-    def _fill_bom_formats(self) -> None:
-        """Board-house formats plus the BOM presets / format presets made in KiCad for this project."""
-        s = self.app.settings
-        p = self.app.current_project()
-        pro = p.pro_file if p else None
-        try:
-            kicad = bom.template_choices(pro, self.app.ki, s)
-        except Exception:  # noqa: BLE001
-            kicad = []
-        mine = [n for n in kicad if bom.USER_MARK in n]
-        values = [self.SHOP_BOM] + mine + bom.FORMAT_NAMES + [n for n in kicad if n not in mine]
-        self.bom_fmt["values"] = values
-        want = s.fab_bom_format
-        if want and want not in values and bom.is_kicad_choice(want):
-            key = bom.plain_name(want).lower()
-            want = next((n for n in kicad if bom.plain_name(n).lower() == key), want)
-        self.bom_fmt.set(want if want in values else self.SHOP_BOM)
-        kf = list(bom.kicad_formats(pro, self.app.ki)) if pro else list(bom.KICAD_BUILTIN_FORMATS)
-        self.kfmt["values"] = ["Project's own format"] + [k for k in kf if k != bom.PROJECT_FORMAT]
-        self.kfmt.set(s.fab_bom_kicad_format if s.fab_bom_kicad_format in kf else "Project's own format")
-        self._show_kfmt()
-
-    def _bom_choice(self) -> str:
-        v = self.bom_fmt.get()
-        return "" if v == self.SHOP_BOM else v
-
-    def _kfmt_choice(self) -> str:
-        v = self.kfmt.get()
-        return "" if v == "Project's own format" else v
-
-    def _show_kfmt(self) -> None:
         prof = fab.get_profile(self._profile_name(), self.app.settings)
-        choice = self._bom_choice() or prof.bom_format or ""
-        kicad = bom.is_kicad_choice(choice)
-        for w in (self.kfmt_label, self.kfmt, self.ftype_box):
-            w.pack_forget()
-        if kicad and "BOM plugin" not in choice:  # a plugin script writes its own file format
-            self.kfmt_label.pack(side="left")
-            self.kfmt.pack(side="left", padx=6)
-        elif not kicad:
+        if bom.is_kicad_choice(prof.bom_format):
+            self.ftype_box.pack_forget()
+        elif not self.ftype_box.winfo_manager():
             self.ftype_box.pack(side="left")
 
     def _steps_changed(self, save: bool = True) -> None:
         # the report only exists when DRC runs
         self.drc_report_cb.state(["!disabled"] if self.steps["refill_drc"].get() else ["disabled"])
-        self.sub_mask_cb.state(["!disabled"] if self.steps["gerbers"].get() else ["disabled"])
         if save:
             self.app.settings.fab_steps = {k: v.get() for k, v in self.steps.items()}
             self.app.settings.save()
 
-    def _bom_changed(self) -> None:
-        s = self.app.settings
-        s.fab_bom_format, s.fab_bom_kicad_format = self._bom_choice(), self._kfmt_choice()
-        s.save()
-        self._show_kfmt()
-
     def _profile_changed(self) -> None:
         prof = fab.get_profile(self._profile_name(), self.app.settings)
         self.notes.set(prof.notes or "")
-        self.sub_mask.set(bool(prof.opt("subtract_soldermask")))
         self.app.settings.fab_profile = prof.name
         self.app.settings.save()
         self.refresh()
@@ -207,9 +145,7 @@ class FabTab(ttk.Frame):
             messagebox.showerror(APP_TITLE, "kicad-cli was not found (Settings → KiCad).")
             return
         opts = fab.FabOptions(profile=self._profile_name(), boards=max(int(self.boards.get() or 1), 1),
-                              file_type=self.ftype.get(), bom_format=self._bom_choice(),
-                              subtract_soldermask=self.sub_mask.get(),
-                              bom_kicad_format=self._kfmt_choice(), **{k: v.get() for k, v in self.steps.items()})
+                              file_type=self.ftype.get(), **{k: v.get() for k, v in self.steps.items()})
         self.go_btn.state(["disabled"])
         self.busy.set("Working…")
         self._write(["Generating…"])

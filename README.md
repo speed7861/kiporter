@@ -114,8 +114,8 @@ automatically.
 
 ### Get files to order boards
 
-1. On the **Fabrication** tab, choose your **Board house**. Under **BOM format**, keep the
-   board house's format or pick a BOM preset you made in KiCad (marked ★).
+1. On the **Fabrication** tab, choose your **Board house**. To use a BOM preset you made in
+   KiCad (marked ★), pick it as the BOM format in **Custom Gerber setup…**.
 2. Click **Generate Build folder**. Kiporter refills zones and runs DRC on a copy of the
    board (your file isn't changed). It then writes the schematic PDF, BOM, Gerbers, drill
    files and pick-and-place file into `<Project> Build` next to your project.
@@ -297,12 +297,11 @@ One click creates a `<Project> Build` folder containing:
 ready to send.
 
 Zones are refilled and DRC is run on a copy first, so your board file is never changed. You can
-leave the DRC report out of the Build folder (DRC still runs and its result is shown), and turn
-**Subtract soldermask from silkscreen** on or off for one build without making a custom setup.
-Your choices are remembered.
+leave the DRC report out of the Build folder (DRC still runs and its result is shown). Your
+choices are remembered.
 
-The BOM can be the board house's format or any BOM preset you made in KiCad, with the KiCad
-format preset of your choice (delimiters, quoting). The placement file stays in the board
+In a custom setup the BOM can be the board house's format or any BOM preset you made in KiCad,
+with the KiCad format preset of your choice (delimiters, quoting). The placement file stays in the board
 house's format either way.
 
 If no preset fits, make a **custom Gerber setup**. You choose the layers, which layers to plot on all layers (such as Edge.Cuts), Gerber options (Protel extensions, X2, netlist attributes, soldermask subtraction, precision), drill options (format, units, zeros, origin, separate PTH/NPTH, drill map) and the BOM format. You can also use the plot settings saved in the board.
