@@ -43,11 +43,13 @@ class FabTab(ttk.Frame):
         ttk.Label(row, text="   Boards:").pack(side="left")
         self.boards = tk.IntVar(value=s.bom_boards or 1)
         ttk.Spinbox(row, from_=1, to=100000, textvariable=self.boards, width=7).pack(side="left", padx=4)
-        self.ftype = tk.StringVar(value=s.bom_file_type)
-        ttk.Label(row, text="   BOM as:").pack(side="left")
-        ttk.Radiobutton(row, text="CSV", variable=self.ftype, value="csv").pack(side="left", padx=(4, 0))
-        ttk.Radiobutton(row, text="Excel", variable=self.ftype, value="xlsx").pack(side="left", padx=4)
         brow = ttk.Frame(self)
+        # board-house formats: CSV or Excel; KiCad presets: KiCad's own output format (shown instead)
+        self.ftype = tk.StringVar(value=s.bom_file_type)
+        self.ftype_box = ttk.Frame(brow)
+        ttk.Label(self.ftype_box, text="   BOM as:").pack(side="left")
+        ttk.Radiobutton(self.ftype_box, text="CSV", variable=self.ftype, value="csv").pack(side="left", padx=(4, 0))
+        ttk.Radiobutton(self.ftype_box, text="Excel", variable=self.ftype, value="xlsx").pack(side="left", padx=4)
         brow.pack(fill="x", pady=(6, 0))
         ttk.Label(brow, text="BOM format:").pack(side="left")
         self.bom_fmt = ttk.Combobox(brow, state="readonly", width=58, height=30)
@@ -137,12 +139,13 @@ class FabTab(ttk.Frame):
     def _show_kfmt(self) -> None:
         prof = fab.get_profile(self._profile_name(), self.app.settings)
         kicad = bom.is_kicad_choice(self._bom_choice() or prof.bom_format)
+        for w in (self.kfmt_label, self.kfmt, self.ftype_box):
+            w.pack_forget()
         if kicad:
             self.kfmt_label.pack(side="left")
             self.kfmt.pack(side="left", padx=6)
         else:
-            self.kfmt_label.pack_forget()
-            self.kfmt.pack_forget()
+            self.ftype_box.pack(side="left")
 
     def _bom_changed(self) -> None:
         s = self.app.settings
