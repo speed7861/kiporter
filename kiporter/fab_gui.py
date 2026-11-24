@@ -15,14 +15,13 @@ APP_TITLE = "Kiporter"
 
 
 class FabTab(ttk.Frame):
-    STEPS = [("refill_drc", "Refill all zones (copper pours) and run DRC + schematic parity - on a copy, "
-                            "your board file is not changed"),
-             ("drc_report", "Put the DRC report in the Build folder (and the production zip)"),
+    STEPS = [("refill_drc", "Refill zones and run DRC"),
+             ("drc_report", "DRC report"),
              ("schematic_pdf", "Schematic PDF"),
-             ("bom", "BOM in the shop's format"),
-             ("gerbers", "Gerbers (all copper, mask, paste, silkscreen and outline layers)"),
-             ("drill", "Drill files (Excellon) + drill map"),
-             ("placement", "Placement / pick-and-place (CPL) file")]
+             ("bom", "BOM"),
+             ("gerbers", "Gerbers"),
+             ("drill", "Drill files"),
+             ("placement", "CPL")]
 
     def __init__(self, parent, app: "App"):
         super().__init__(parent, padding=10)
@@ -76,8 +75,7 @@ class FabTab(ttk.Frame):
             if key == "gerbers":
                 # per-build override of the board setup's option; reset when the board house changes
                 self.sub_mask = tk.BooleanVar()
-                self.sub_mask_cb = ttk.Checkbutton(box, text="Subtract soldermask from silkscreen (clips silkscreen "
-                                                   "off pads and other mask openings)", variable=self.sub_mask)
+                self.sub_mask_cb = ttk.Checkbutton(box, text="Subtract soldermask from silkscreen", variable=self.sub_mask)
                 self.sub_mask_cb.pack(anchor="w", padx=(28, 8), pady=1)
         self._steps_changed(save=False)
 
