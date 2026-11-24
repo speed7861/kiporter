@@ -265,9 +265,12 @@ def list_libraries(project: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ)
-def list_formats() -> dict[str, Any]:
-    """BOM export formats, board-house profiles, suppliers (and whether they are connected) and CAD sources."""
-    return _run(["formats"])
+def list_formats(project: str | None = None) -> dict[str, Any]:
+    """BOM export formats, board-house profiles, suppliers (and whether they are connected) and CAD sources.
+    With a project (or one open in KiCad): also the BOM presets and format presets made in KiCad for it."""
+    argv = ["formats"]
+    _opt(argv, "--project", project)
+    return _run(argv)
 
 
 @mcp.tool(annotations=READ)
@@ -294,10 +297,12 @@ def read_bom(project: str | None = None, check_stock: bool = False, boards: int 
 @mcp.tool(annotations=WRITE)
 def export_bom(format: str = "JLCPCB", project: str | None = None, out_dir: str | None = None, boards: int = 1,
                file_type: Literal["csv", "xlsx"] = "csv", include_dnp: bool = False,
-               placement_file: bool = True) -> dict[str, Any]:
+               placement_file: bool = True, kicad_format: str | None = None) -> dict[str, Any]:
     """Write the BOM (and the placement/CPL file when the format has one) for a board house or distributor.
-    Formats: see list_formats. Files go to out_dir, or the project folder."""
+    format can also be a BOM preset made in KiCad (kicad_bom_presets in list_formats); kicad_format picks its
+    KiCad format preset (default: the project's). Files go to out_dir, or the project folder."""
     argv = ["bom-export", "--format", format, "--boards", str(max(1, boards)), "--file-type", file_type]
+    _opt(argv, "--kicad-format", kicad_format)
     _opt(argv, "--project", project)
     _opt(argv, "--out", out_dir)
     _opt(argv, "--include-dnp", include_dnp)
@@ -307,11 +312,15 @@ def export_bom(format: str = "JLCPCB", project: str | None = None, out_dir: str 
 
 @mcp.tool(annotations=WRITE)
 def generate_fabrication(project: str | None = None, profile: str | None = None, boards: int = 1,
-                         refill_and_drc: bool = True, make_zip: bool = False) -> dict[str, Any]:
+                         refill_and_drc: bool = True, make_zip: bool = False, bom_format: str | None = None,
+                         kicad_format: str | None = None) -> dict[str, Any]:
     """Write '<Project> Build' next to the project: Gerbers, drill, BOM, placement file, schematic PDF and a
     DRC report (zones are refilled on a copy; the board file is not changed). make_zip: also write
-    '<Project> Build.zip'. profile: board house, see list_formats. Takes a minute or more."""
+    '<Project> Build.zip'. profile: board house, see list_formats. bom_format: override the board house's BOM
+    format, e.g. with a BOM preset made in KiCad. Takes a minute or more."""
     argv = ["fab", "--boards", str(max(1, boards))]
+    _opt(argv, "--bom-format", bom_format)
+    _opt(argv, "--kicad-format", kicad_format)
     _opt(argv, "--project", project)
     _opt(argv, "--profile", profile)
     _opt(argv, "--no-drc", not refill_and_drc)

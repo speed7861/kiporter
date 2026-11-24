@@ -461,10 +461,11 @@ def _from_preset(name: str, p: dict, source: str) -> KicadTemplate | None:
     shown = [f for f in ordered if f.get("show")]
     if not shown:
         return None
+    grouped = p.get("group_symbols", True)  # KiCad 9/10: "Group symbols" unticked = one line per symbol
     return KicadTemplate(
         name=KICAD_PREFIX + name, kind="preset", fields=[f["name"] for f in shown],
         labels=[f.get("label") or KICAD_LABELS.get(f["name"], f["name"]) for f in shown],
-        group_by=[f["name"] for f in ordered if f.get("group_by")], sort_field=p.get("sort_field") or "Reference",
+        group_by=[f["name"] for f in ordered if f.get("group_by")] if grouped else [], sort_field=p.get("sort_field") or "Reference",
         sort_asc=bool(p.get("sort_asc", True)), filter=p.get("filter_string") or "",
         exclude_dnp=bool(p.get("exclude_dnp")), source=source)
 
@@ -520,17 +521,19 @@ def kicad_templates(project_file: Path, ki: KiCadInstall, settings: Settings | N
     def add_preset(label: str, p: dict, source: str) -> None:
         t = _from_preset(label, p, source)
         if t:
-            key = (tuple(t.fields), tuple(t.group_by))
+            key = (tuple(t.fields), tuple(t.labels), tuple(t.group_by), t.sort_field, t.filter, t.exclude_dnp)
             if key not in seen_presets:
                 seen_presets.add(key)
                 t.name = KICAD_PREFIX + USER_MARK + t.name[len(KICAD_PREFIX):]
                 user.append(t)
 
     sch = _read_json(project_file).get("schematic", {})
-    if sch.get("bom_settings"):
-        add_preset("Project BOM settings (as set up in KiCad)", sch["bom_settings"], "project")
+    # named presets first: a preset you just saved is usually identical to the current settings,
+    # and it should be listed under its own name
     for p in sch.get("bom_presets") or []:
         add_preset(f"{p.get('name', 'Preset')} (preset in this project)", p, "project")
+    if sch.get("bom_settings"):
+        add_preset("Project BOM settings (as set up in KiCad)", sch["bom_settings"], "project")
     for other in _recent_projects(ki):
         if other == project_file or not other.exists():
             continue
@@ -593,7 +596,7 @@ def kicad_formats(project_file: Path, ki: KiCadInstall | None = None) -> dict[st
     sch = _read_json(project_file).get("schematic", {})
     fmts = dict(KICAD_BUILTIN_FORMATS)
     if sch.get("bom_fmt_settings"):
-        fmts["Project format (as set up in KiCad)"] = sch["bom_fmt_settings"]
+        fmts[PROJECT_FORMAT] = sch["bom_fmt_settings"]
     for p in sch.get("bom_fmt_presets") or []:
         fmts[f"{p.get('name', 'Format')} (preset in this project)"] = p
     for other in (_recent_projects(ki) if ki else []):
@@ -601,6 +604,52 @@ def kicad_formats(project_file: Path, ki: KiCadInstall | None = None) -> dict[st
             for p in _read_json(other).get("schematic", {}).get("bom_fmt_presets") or []:
                 fmts.setdefault(f"{p.get('name', 'Format')} (preset from {other.stem})", p)
     return fmts
+
+
+def plain_name(name: str) -> str:
+    """'KiCad: ★ JLC (preset in this project)' -> 'JLC'."""
+    n = name[len(KICAD_PREFIX):] if name.startswith(KICAD_PREFIX) else name
+    n = n[len(USER_MARK):] if n.startswith(USER_MARK) else n
+    return n.split(" (")[0].strip()
+
+
+def is_kicad_choice(name: str | None) -> bool:
+    return bool(name) and name.startswith(KICAD_PREFIX)
+
+
+def template_choices(project_file: Path | None, ki: KiCadInstall, settings: Settings | None = None) -> list[str]:
+    """KiCad BOM presets/plugins usable without asking anything (for the Build folder and board setups)."""
+    if not project_file:
+        return [KICAD_PREFIX + n for n in KICAD_BUILTIN_PRESETS]
+    return [t.name for t in kicad_templates(project_file, ki, settings) if t.source != "missing"]
+
+
+def find_template(name: str, project_file: Path, ki: KiCadInstall,
+                  settings: Settings | None = None) -> KicadTemplate | None:
+    """A KiCad template by its listed name; falls back to the preset's own name, so a setup saved
+    with 'JLC (preset in this project)' still finds 'JLC' in another project."""
+    ts = [t for t in kicad_templates(project_file, ki, settings) if t.source != "missing"]
+    hit = next((t for t in ts if t.name == name), None)
+    if hit:
+        return hit
+    key = plain_name(name).lower()
+    return next((t for t in ts if plain_name(t.name).lower() == key), None)
+
+
+PROJECT_FORMAT = "Project format (as set up in KiCad)"
+
+
+def find_kicad_format(name: str | None, project_file: Path, ki: KiCadInstall | None = None) -> dict:
+    """Delimiters for a KiCad preset export: the named format preset, else the project's own format."""
+    fmts = kicad_formats(project_file, ki)
+    if name:
+        if name in fmts:
+            return fmts[name]
+        key = plain_name(name).lower()
+        hit = next((v for k, v in fmts.items() if plain_name(k).lower() == key), None)
+        if hit:
+            return hit
+    return fmts.get(PROJECT_FORMAT) or KICAD_BUILTIN_FORMATS["CSV"]
 
 
 def _python_exe() -> str:
@@ -615,7 +664,7 @@ def export_kicad_template(t: KicadTemplate, project_file: Path, ki: KiCadInstall
                           fmt: dict | None = None) -> list[Path]:
     sch = project_file.with_suffix(".kicad_sch")
     out_dir.mkdir(parents=True, exist_ok=True)
-    tag = re.sub(r"[^A-Za-z0-9]+", "_", t.name[len(KICAD_PREFIX):]).strip("_")
+    tag = re.sub(r"[^A-Za-z0-9]+", "_", plain_name(t.name)).strip("_") or "KiCad"
     if t.kind == "plugin":
         script, ext = t.command
         if not script or not Path(script).exists():

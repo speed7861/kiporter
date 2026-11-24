@@ -114,7 +114,8 @@ automatically.
 
 ### Get files to order boards
 
-1. On the **Fabrication** tab, choose your **Board house**.
+1. On the **Fabrication** tab, choose your **Board house**. Under **BOM format**, keep the
+   board house's format or pick a BOM preset you made in KiCad (marked ★).
 2. Click **Generate Build folder**. Kiporter refills zones and runs DRC on a copy of the
    board (your file isn't changed). It then writes the schematic PDF, BOM, Gerbers, drill
    files and pick-and-place file into `<Project> Build` next to your project.
@@ -171,7 +172,9 @@ kiporter libraries                               # where parts can be imported t
 kiporter bom --stock --boards 5                  # BOM with stock status
 kiporter bom-export --format JLCPCB --out out/   # BOM + CPL for a board house
 kiporter fab --profile JLCPCB --zip              # Build folder (Gerbers, drill, BOM, CPL, PDF, DRC)
-kiporter formats                                 # BOM formats, board houses, suppliers
+kiporter formats --project my.kicad_pro         # BOM formats (and your KiCad BOM presets), board houses, suppliers
+kiporter bom-export --format "My JLC" --kicad-format Pipes   # a BOM preset made in KiCad
+kiporter fab --bom-format "My JLC"               # Build folder with your KiCad BOM preset
 kiporter update-pcb                              # Update PCB from Schematic in the open KiCad
 ```
 
@@ -281,7 +284,7 @@ line. The AI can't choose for you. Setup takes two commands; see
   Aisler, MacroFab, with pick-and-place/CPL files.
 - **Export for distributor BOM tools:** Digi-Key, Mouser and LCSC.
 - Exports as CSV or Excel.
-- **Your own BOM formats are listed first (marked with ★):** your project's KiCad BOM settings, BOM presets saved in any of your recent projects, and BOM plugin scripts you registered in any KiCad version or added in Kiporter. KiCad's built-in presets and the BOM scripts that ship with KiCad are listed after them. Each has a live preview. If a plugin's script has moved, pick its new location once and Kiporter remembers it.
+- **Your own BOM formats are listed first (marked with ★):** BOM presets and format presets you made in KiCad 8, 9 or 10 (Symbol Fields Table → Export → Save preset), your project's current KiCad BOM settings, BOM presets saved in any of your recent projects, and BOM plugin scripts you registered in any KiCad version or added in Kiporter. KiCad's built-in presets and the BOM scripts that ship with KiCad are listed after them. Each has a live preview. If a plugin's script has moved, pick its new location once and Kiporter remembers it.
 
 ### Fabrication
 One click creates a `<Project> Build` folder containing:
@@ -293,6 +296,10 @@ One click creates a `<Project> Build` folder containing:
 ready to send.
 
 Zones are refilled and DRC is run on a copy first, so your board file is never changed.
+
+The BOM can be the board house's format or any BOM preset you made in KiCad, with the KiCad
+format preset of your choice (delimiters, quoting). The placement file stays in the board
+house's format either way.
 
 If no preset fits, make a **custom Gerber setup**. You choose the layers, which layers to plot on all layers (such as Edge.Cuts), Gerber options (Protel extensions, X2, netlist attributes, soldermask subtraction, precision), drill options (format, units, zeros, origin, separate PTH/NPTH, drill map) and the BOM format. You can also use the plot settings saved in the board.
 

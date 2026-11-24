@@ -1334,7 +1334,7 @@ class BomExportDialog(_ToolDialog):
         self.opts_kicad = ttk.Frame(b)  # options for KiCad presets
         ttk.Label(self.opts_kicad, text="KiCad output format:").pack(side="left")
         self.kfmt = ttk.Combobox(self.opts_kicad, state="readonly", width=36, values=list(self.kfmts))
-        self.kfmt.current(len(self.kfmts) - 1 if "Project format (as set up in KiCad)" in self.kfmts else 0)
+        self.kfmt.set(bom.PROJECT_FORMAT if bom.PROJECT_FORMAT in self.kfmts else next(iter(self.kfmts)))
         self.kfmt.pack(side="left", padx=6)
         self.kfmt.bind("<<ComboboxSelected>>", lambda e: self._update())
 

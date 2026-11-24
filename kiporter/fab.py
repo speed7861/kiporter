@@ -53,7 +53,8 @@ DEFAULT_OPTIONS: dict = {
     "drill_oval": "alternate",  # alternate | route
     "drill_separate_th": False,  # separate PTH / NPTH files
     "drill_map": "gerberx2",  # none | pdf | gerberx2 | svg | dxf | ps
-    "bom_format": "Generic (all fields)",
+    "bom_format": "Generic (all fields)",  # a Kiporter format, or "KiCad: ..." for a KiCad BOM preset/plugin
+    "bom_kicad_format": "",  # delimiters for a KiCad preset ("" = the project's own format)
     "notes": "",
     "url": "",
 }
@@ -197,6 +198,8 @@ class FabOptions:
     make_zip: bool = False  # the production zip is made by its own button, not with the Build folder
     boards: int = 1
     file_type: str = "csv"
+    bom_format: str = ""  # overrides the board setup's BOM format ("" = use the setup's)
+    bom_kicad_format: str = ""
 
 
 @dataclass
@@ -323,8 +326,26 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
                 lines = bom.read_bom(project_file, ki, settings)
             except Exception as e:  # noqa: BLE001
                 res.warnings.append(f"BOM failed: {e}")
-        fmt = bom.get_format(prof.bom_format or "Generic (all fields)")
-        if opts.bom and lines is not None:
+        chosen = opts.bom_format or prof.bom_format or "Generic (all fields)"
+        shop_fmt = bom.get_format(prof.bom_format or "Generic (all fields)")
+        fmt = shop_fmt
+        if bom.is_kicad_choice(chosen):
+            # a BOM preset / format made in KiCad (Symbol Fields Table → Export), or a BOM plugin script
+            t = bom.find_template(chosen, project_file, ki, settings) if opts.bom else None
+            if opts.bom and t is None:
+                res.warnings.append(f"KiCad BOM preset '{bom.plain_name(chosen)}' is not in this project - "
+                                    f"wrote the {shop_fmt.name} BOM instead.")
+                chosen = shop_fmt.name
+            elif t is not None:
+                log(f"Writing BOM (KiCad: {bom.plain_name(t.name)})…")
+                kfmt = bom.find_kicad_format(opts.bom_kicad_format or prof.opt("bom_kicad_format"), project_file, ki)
+                try:
+                    res.files += bom.export_kicad_template(t, project_file, ki, build, name, kfmt)
+                except Exception as e:  # noqa: BLE001
+                    res.warnings.append(f"KiCad BOM preset failed: {e}")
+        else:
+            fmt = bom.get_format(chosen)
+        if opts.bom and lines is not None and not bom.is_kicad_choice(chosen):
             log(f"Writing BOM ({fmt.name})…")
             res.files += bom.export(lines, fmt, build, name, opts.boards, settings.bom_include_dnp, opts.file_type)
             miss = bom.missing_fields(lines, fmt)
@@ -360,7 +381,7 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
                 try:
                     places = bom.read_positions(work_pcb.with_suffix(".kicad_pro"), ki)
                     dnp = {r for l in (lines or []) if l.dnp for r in l.refs} if not settings.bom_include_dnp else set()
-                    cpl_fmt = fmt.cpl or "Generic"
+                    cpl_fmt = fmt.cpl or shop_fmt.cpl or "Generic"
                     # placement files are always CSV (board houses' pick-and-place tools read CSV), and they
                     # sit next to the BOM: both are uploaded in the assembly step, not with the Gerbers
                     out = build / f"{name}-CPL-{re.sub(r'[^A-Za-z0-9]+', '_', prof.name).strip('_')}.csv"

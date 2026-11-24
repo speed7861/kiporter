@@ -6,7 +6,7 @@ import webbrowser
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
-from . import fab, kicad_control
+from . import bom, fab, kicad_control
 
 if TYPE_CHECKING:
     from .gui import App
@@ -47,6 +47,15 @@ class FabTab(ttk.Frame):
         ttk.Label(row, text="   BOM as:").pack(side="left")
         ttk.Radiobutton(row, text="CSV", variable=self.ftype, value="csv").pack(side="left", padx=(4, 0))
         ttk.Radiobutton(row, text="Excel", variable=self.ftype, value="xlsx").pack(side="left", padx=4)
+        brow = ttk.Frame(self)
+        brow.pack(fill="x", pady=(6, 0))
+        ttk.Label(brow, text="BOM format:").pack(side="left")
+        self.bom_fmt = ttk.Combobox(brow, state="readonly", width=58, height=30)
+        self.bom_fmt.pack(side="left", padx=6)
+        self.bom_fmt.bind("<<ComboboxSelected>>", lambda e: self._bom_changed())
+        self.kfmt_label = ttk.Label(brow, text="   KiCad output format:")
+        self.kfmt = ttk.Combobox(brow, state="readonly", width=34)
+        self.kfmt.bind("<<ComboboxSelected>>", lambda e: self._bom_changed())
         self.notes = tk.StringVar()
         ttk.Label(self, textvariable=self.notes, wraplength=1100, justify="left", style="Muted.TLabel").pack(
             fill="x", pady=(6, 4))
@@ -87,10 +96,59 @@ class FabTab(ttk.Frame):
     def edit_profile(self) -> None:
         FabProfileEditor(self, self._profile_name())
 
+    SHOP_BOM = "Board house format (from the board setup)"
+
     def refresh(self) -> None:
         p = self.app.current_project()
         self.project_info.set(f"Project: {p.pro_file}   →   output: {fab.build_dir_for(p.pro_file)}" if p
                               else "Select a project at the top of the window.")
+        self._fill_bom_formats()
+
+    def _fill_bom_formats(self) -> None:
+        """Board-house formats plus the BOM presets / format presets made in KiCad for this project."""
+        s = self.app.settings
+        p = self.app.current_project()
+        pro = p.pro_file if p else None
+        try:
+            kicad = bom.template_choices(pro, self.app.ki, s)
+        except Exception:  # noqa: BLE001
+            kicad = []
+        mine = [n for n in kicad if bom.USER_MARK in n]
+        values = [self.SHOP_BOM] + mine + bom.FORMAT_NAMES + [n for n in kicad if n not in mine]
+        self.bom_fmt["values"] = values
+        want = s.fab_bom_format
+        if want and want not in values and bom.is_kicad_choice(want):
+            key = bom.plain_name(want).lower()
+            want = next((n for n in kicad if bom.plain_name(n).lower() == key), want)
+        self.bom_fmt.set(want if want in values else self.SHOP_BOM)
+        kf = list(bom.kicad_formats(pro, self.app.ki)) if pro else list(bom.KICAD_BUILTIN_FORMATS)
+        self.kfmt["values"] = ["Project's own format"] + [k for k in kf if k != bom.PROJECT_FORMAT]
+        self.kfmt.set(s.fab_bom_kicad_format if s.fab_bom_kicad_format in kf else "Project's own format")
+        self._show_kfmt()
+
+    def _bom_choice(self) -> str:
+        v = self.bom_fmt.get()
+        return "" if v == self.SHOP_BOM else v
+
+    def _kfmt_choice(self) -> str:
+        v = self.kfmt.get()
+        return "" if v == "Project's own format" else v
+
+    def _show_kfmt(self) -> None:
+        prof = fab.get_profile(self._profile_name(), self.app.settings)
+        kicad = bom.is_kicad_choice(self._bom_choice() or prof.bom_format)
+        if kicad:
+            self.kfmt_label.pack(side="left")
+            self.kfmt.pack(side="left", padx=6)
+        else:
+            self.kfmt_label.pack_forget()
+            self.kfmt.pack_forget()
+
+    def _bom_changed(self) -> None:
+        s = self.app.settings
+        s.fab_bom_format, s.fab_bom_kicad_format = self._bom_choice(), self._kfmt_choice()
+        s.save()
+        self._show_kfmt()
 
     def _profile_changed(self) -> None:
         prof = fab.get_profile(self._profile_name(), self.app.settings)
@@ -127,7 +185,8 @@ class FabTab(ttk.Frame):
             messagebox.showerror(APP_TITLE, "kicad-cli was not found (Settings → KiCad).")
             return
         opts = fab.FabOptions(profile=self._profile_name(), boards=max(int(self.boards.get() or 1), 1),
-                              file_type=self.ftype.get(), **{k: v.get() for k, v in self.steps.items()})
+                              file_type=self.ftype.get(), bom_format=self._bom_choice(),
+                              bom_kicad_format=self._kfmt_choice(), **{k: v.get() for k, v in self.steps.items()})
         self.go_btn.state(["disabled"])
         self.busy.set("Working…")
         self._write(["Generating…"])
@@ -265,9 +324,22 @@ class FabProfileEditor(tk.Toplevel):
         ob.pack(fill="x")
         ttk.Label(ob, text="BOM format").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.vars["bom_format"] = tk.StringVar()
-        ttk.Combobox(ob, textvariable=self.vars["bom_format"], values=["(none)"] + bom.FORMAT_NAMES,
-                     state="readonly", width=30).grid(row=0, column=1, sticky="w")
-        for r, (key, label) in enumerate((("notes", "Notes shown in the tab"), ("url", "Order page URL")), start=1):
+        p = self.app.current_project()
+        try:
+            kicad = bom.template_choices(p.pro_file if p else None, self.app.ki, self.app.settings)
+        except Exception:  # noqa: BLE001
+            kicad = []
+        ttk.Combobox(ob, textvariable=self.vars["bom_format"], values=["(none)"] + bom.FORMAT_NAMES + kicad,
+                     state="readonly", width=50, height=30).grid(row=0, column=1, sticky="w")
+        ttk.Label(ob, text="KiCad output format").grid(row=1, column=0, sticky="w", padx=(0, 8))
+        self.vars["bom_kicad_format"] = tk.StringVar()
+        kf = list(bom.kicad_formats(p.pro_file, self.app.ki)) if p else list(bom.KICAD_BUILTIN_FORMATS)
+        ttk.Combobox(ob, textvariable=self.vars["bom_kicad_format"],
+                     values=["(project's own)"] + [k for k in kf if k != bom.PROJECT_FORMAT],
+                     state="readonly", width=50).grid(row=1, column=1, sticky="w")
+        ttk.Label(ob, text="Used when the BOM format is a KiCad preset (KiCad: …).", style="Muted.TLabel").grid(
+            row=2, column=1, sticky="w")
+        for r, (key, label) in enumerate((("notes", "Notes shown in the tab"), ("url", "Order page URL")), start=3):
             ttk.Label(ob, text=label).grid(row=r, column=0, sticky="w", padx=(0, 8), pady=1)
             self.vars[key] = tk.StringVar()
             ttk.Entry(ob, textvariable=self.vars[key], width=50).grid(row=r, column=1, sticky="ew")
@@ -295,6 +367,8 @@ class FabProfileEditor(tk.Toplevel):
             val = prof.opt(key)
             if key == "bom_format":
                 v.set(val or "(none)")
+            elif key == "bom_kicad_format":
+                v.set(val or "(project's own)")
             elif isinstance(v, tk.BooleanVar):
                 v.set(bool(val))
             else:
@@ -319,6 +393,8 @@ class FabProfileEditor(tk.Toplevel):
             val = v.get()
             if key == "bom_format":
                 val = None if val == "(none)" else val
+            elif key == "bom_kicad_format":
+                val = "" if val == "(project's own)" else val
             elif key == "precision":
                 val = int(val)
             opts[key] = val

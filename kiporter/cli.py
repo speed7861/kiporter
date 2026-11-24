@@ -519,11 +519,22 @@ def cmd_bom_export(ctx: Ctx) -> dict:
     pro = ctx.project(a.project)
     names = [f.name for f in bom.FORMATS]
     fmt = next((f for f in bom.FORMATS if f.name.lower() == a.format.lower()), None)
+    out_dir = Path(a.out).expanduser().resolve() if a.out else pro.parent
     if not fmt:
-        raise CliError(f"Unknown BOM format '{a.format}'. Known: {', '.join(names)}", EXIT_USAGE)
+        # a BOM preset made in KiCad (Symbol Fields Table -> Export), or a KiCad BOM plugin
+        t = bom.find_template(a.format if bom.is_kicad_choice(a.format) else bom.KICAD_PREFIX + a.format,
+                              pro, ctx.ki, ctx.settings)
+        if not t:
+            kicad = [bom.plain_name(n) for n in bom.template_choices(pro, ctx.ki, ctx.settings)]
+            raise CliError(f"Unknown BOM format '{a.format}'. Known: {', '.join(names)}; KiCad presets: "
+                           f"{', '.join(kicad)}", EXIT_USAGE)
+        kfmt = bom.find_kicad_format(a.kicad_format, pro, ctx.ki)
+        files = bom.export_kicad_template(t, pro, ctx.ki, out_dir, pro.stem, kfmt)
+        out = {"format": t.name, "files": [str(f) for f in files], "missing": [], "notes": ""}
+        out["_text"] = "\n".join(f"Wrote {f}" for f in files)
+        return out
     lines = bom.read_bom(pro, ctx.ki, ctx.settings)
     places = bom.read_positions(pro, ctx.ki) if (fmt.cpl and not a.no_cpl) else None
-    out_dir = Path(a.out).expanduser().resolve() if a.out else pro.parent
     files = bom.export(lines, fmt, out_dir, pro.stem, a.boards, a.include_dnp, a.file_type, places)
     missing = bom.missing_fields(lines, fmt)
     out = {"format": fmt.name, "files": [str(f) for f in files], "missing": missing, "notes": fmt.notes}
@@ -538,7 +549,12 @@ def cmd_formats(ctx: Ctx) -> dict:
                            "connected": ctx.providers[n].configured or not ctx.providers[n].key_fields}
                        for n, flag in providers.ENABLE_FLAGS.items()},
            "cad_sources": cad_sources.order(ctx.settings)}
+    pro = ctx.project(getattr(ctx.args, "project", None), required=False)
+    if pro:
+        out["kicad_bom_presets"] = [bom.plain_name(n) for n in bom.template_choices(pro, ctx.ki, ctx.settings)]
+        out["kicad_bom_output_formats"] = list(bom.kicad_formats(pro, ctx.ki))
     out["_text"] = ("BOM formats:  " + ", ".join(f["name"] for f in out["bom_formats"]) +
+                    (f"\nKiCad BOM presets ({pro.stem}): " + ", ".join(out["kicad_bom_presets"]) if pro else "") +
                     "\nFab profiles: " + ", ".join(out["fab_profiles"]) +
                     "\nSuppliers:    " + ", ".join(f"{n}{'' if s['connected'] else ' (not connected)'}"
                                                    for n, s in out["sources"].items()) +
@@ -554,8 +570,13 @@ def cmd_fab(ctx: Ctx) -> dict:
     prof = a.profile or ctx.settings.fab_profile
     if prof not in profiles:
         raise CliError(f"Unknown board house '{prof}'. Known: {', '.join(profiles)}", EXIT_USAGE)
+    bf = a.bom_format or ""
+    if bf and not bom.is_kicad_choice(bf) and bf.lower() not in (f.name.lower() for f in bom.FORMATS):
+        bf = bom.KICAD_PREFIX + bf  # a KiCad preset given by its own name
+    bf = next((f.name for f in bom.FORMATS if f.name.lower() == bf.lower()), bf)
     opts = fab.FabOptions(profile=prof, refill_drc=not a.no_drc, boards=a.boards,
-                          file_type=ctx.settings.bom_file_type or "csv")
+                          file_type=ctx.settings.bom_file_type or "csv", bom_format=bf,
+                          bom_kicad_format=a.kicad_format or "")
     res = fab.generate(pro, ctx.ki, ctx.settings, opts, log)
     if a.zip:
         res.zip_file = fab.make_zip(res.build_dir, fab.zip_path_for(pro))
@@ -639,7 +660,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project")
     p = add("check-setup", cmd_check_setup, "check KiCad paths and library tables for problems")
     p.add_argument("--project")
-    add("formats", cmd_formats, "list BOM formats, board houses, suppliers and CAD sources")
+    p = add("formats", cmd_formats, "list BOM formats (and the project's KiCad BOM presets), board houses, "
+                                    "suppliers and CAD sources")
+    p.add_argument("--project")
 
     p = add("bom", cmd_bom, "read a project's BOM, optionally with stock and lead times")
     p.add_argument("--project")
@@ -649,7 +672,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("bom-export", cmd_bom_export, "export the BOM (and CPL) for a board house or distributor")
     p.add_argument("--project")
-    p.add_argument("-f", "--format", default="JLCPCB", help="see 'kiporter formats'")
+    p.add_argument("-f", "--format", default="JLCPCB",
+                   help="a board-house format or the name of a BOM preset made in KiCad; see 'kiporter formats'")
+    p.add_argument("--kicad-format", help="KiCad format preset for a KiCad BOM preset (default: the project's)")
     p.add_argument("-o", "--out", help="output folder (default: the project folder)")
     p.add_argument("--boards", type=int, default=1)
     p.add_argument("--file-type", choices=["csv", "xlsx"], default="csv")
@@ -661,6 +686,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", help="board house (see 'kiporter formats'); default: the GUI's choice")
     p.add_argument("--boards", type=int, default=1)
     p.add_argument("--no-drc", action="store_true", help="skip zone refill and DRC")
+    p.add_argument("--bom-format", help="override the board house's BOM format (a format or a KiCad BOM preset)")
+    p.add_argument("--kicad-format", help="KiCad format preset for a KiCad BOM preset (default: the project's)")
     p.add_argument("--zip", action="store_true", help="also create '<Project> Build.zip'")
 
     p = add("update-pcb", cmd_update_pcb, "run 'Update PCB from Schematic' in the open KiCad")

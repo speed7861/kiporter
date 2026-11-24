@@ -190,7 +190,8 @@ def test_kicad_bom_templates_from_project(tmp_path):
         "bom_fmt_presets": [{"name": "Pipes", "field_delimiter": "|"}]}}), encoding="utf-8")
     ki = kicad_env.KiCadInstall("10.0", tmp_path)
     names = [t.name for t in bom.kicad_templates(pro, ki)]
-    assert names[0].startswith(bom.KICAD_PREFIX + bom.USER_MARK + "Project BOM settings")
+    assert names[0].startswith(bom.KICAD_PREFIX + bom.USER_MARK + "Mine")  # named presets first
+    assert names[1].startswith(bom.KICAD_PREFIX + bom.USER_MARK + "Project BOM settings")
     assert any("Mine" in n for n in names) and any("Grouped By Value" in n for n in names)
     assert "Pipes (preset in this project)" in bom.kicad_formats(pro)
 
@@ -597,3 +598,27 @@ def test_calculators_match_reference_values():
     assert abs(lp.centre - 4.95) < 0.03 and abs(lp.x - 0.6) < 0.01 and lp.gap_to_next > 0.5
     chip = c.land_pattern("Chip resistor / capacitor (0603 and larger)", "B", (1.5, 1.7), (0.2, 0.5), (0.7, 0.9))
     assert abs(chip.z - 2.45) < 0.01 and chip.toe > 0
+
+
+def test_kicad_bom_presets_and_format_presets(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from kiporter import bom
+    pro = tmp_path / "board.kicad_pro"
+    fields = [{"name": "Value", "label": "Comment", "show": True, "group_by": True},
+              {"name": "Reference", "label": "Designator", "show": True, "group_by": False}]
+    pro.write_text(json.dumps({"schematic": {
+        # a preset identical to the current settings must still show under its own name
+        "bom_settings": {"fields_ordered": fields, "group_symbols": True},
+        "bom_presets": [{"name": "My JLC", "fields_ordered": fields, "group_symbols": True},
+                        {"name": "Flat", "fields_ordered": fields, "group_symbols": False}],
+        "bom_fmt_settings": {"name": "CSV", "field_delimiter": ","},
+        "bom_fmt_presets": [{"name": "Pipes", "field_delimiter": "|"}]}}), encoding="utf-8")
+    ki = SimpleNamespace(cli=[], share_dir=None, config_dir=tmp_path, version="10.0", major=10)
+    names = bom.template_choices(pro, ki)
+    assert any(bom.plain_name(n) == "My JLC" for n in names)
+    assert bom.find_template("KiCad: My JLC", pro, ki).group_by == ["Value"]
+    assert bom.find_template("KiCad: Flat", pro, ki).group_by == []
+    assert bom.find_template("KiCad: nope", pro, ki) is None
+    assert bom.find_kicad_format("Pipes", pro)["field_delimiter"] == "|"
+    assert bom.find_kicad_format("", pro)["field_delimiter"] == ","
