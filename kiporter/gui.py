@@ -233,6 +233,9 @@ class App(tk.Tk):
         self.nb.add(self.fab_tab, text="  Fabrication  ")
         self.tools_tab = ToolsTab(self.nb, self)
         self.nb.add(self.tools_tab, text="  Library Tools  ")
+        from .calc_gui import CalculatorTab
+        self.calc_tab = CalculatorTab(self.nb, self)
+        self.nb.add(self.calc_tab, text="  Calculators  ")
         self.settings_tab = SettingsTab(self.nb, self)
         self.nb.add(self.settings_tab, text="  Settings  ")
 

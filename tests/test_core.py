@@ -574,3 +574,26 @@ def test_plot_on_all_layers_option():
     generic = fab.get_profile("Generic (KiCad defaults)", None)
     assert generic.common_layers(pcb) == ["Edge.Cuts"] and generic.opt("pdf_layers")
     assert fab.get_profile("JLCPCB", None).common_layers(pcb) == []  # board-house presets keep their own setup
+
+
+def test_calculators_match_reference_values():
+    import math
+    from kiporter import calcs as c
+    assert abs(c.ellip_k(0.5) - 1.685750) < 1e-6 and abs(c.ellip_k(0) - math.pi / 2) < 1e-12
+    assert abs(c.microstrip(2.9, 1.6, 4.6, 0.035).z0 - 50.2) < 0.5  # 1.6 mm FR4: ~2.9 mm for 50 ohm
+    assert abs(c.microstrip(1.0, 1.0, 1.0).z0 - 126.5) < 1  # air line, W = h
+    assert abs(c.cpw(1.0, 0.2, 100.0, 4.5).eeff - 2.75) < 0.01  # thick substrate: (er + 1) / 2
+    g = c.cpw_grounded(0.35, 0.15, 0.2, 4.3)
+    assert 45 < g.z0 < 55 and c.cpw_grounded(0.35, 0.15, 0.2, 4.3, 0.035).z0 < g.z0  # thick copper lowers Z0
+    w = c.solve_width(lambda w: c.stripline(w, 0.5, 4.3, 0.035).z0, 50, 0.005, 25)
+    assert abs(c.stripline(w, 0.5, 4.3, 0.035).z0 - 50) < 0.01
+    a = c.attenuator(6, 50)
+    assert round(a["pi_shunt"], 1) == 150.5 and round(a["pi_series"], 2) == 37.35
+    assert abs(c.skin_depth_mm(1e6) - 0.066) < 0.001
+    assert abs(c.trace_width_for_current(1, 10, 1, False)["width_mil"] - 11.9) < 0.3
+    assert abs(c.mismatch(c.gamma_from("VSWR", 2))["return_loss_db"] - 9.54) < 0.01
+    # IPC-7351B SOIC-8, density B: same pads as KiCad's own SOIC-8 footprint (centres 4.95 mm, 0.6 mm wide)
+    lp = c.land_pattern("Gull-wing leads (pitch over 0.625 mm)", "B", (5.8, 6.2), (0.4, 1.27), (0.31, 0.51), pitch=1.27)
+    assert abs(lp.centre - 4.95) < 0.03 and abs(lp.x - 0.6) < 0.01 and lp.gap_to_next > 0.5
+    chip = c.land_pattern("Chip resistor / capacitor (0603 and larger)", "B", (1.5, 1.7), (0.2, 0.5), (0.7, 0.9))
+    assert abs(chip.z - 2.45) < 0.01 and chip.toe > 0

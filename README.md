@@ -308,6 +308,19 @@ If no preset fits, make a **custom Gerber setup**. You choose the layers, which 
   disabled API.
 - **Back up a library** to a ZIP file.
 
+### Calculators
+A **Calculators** tab with the sums you need while laying out a board. Every result updates as you type,
+and the transmission-line calculators have a **Find width** button that solves for a target impedance.
+- **Transmission lines:** microstrip (Hammerstad & Jensen, with the IPC-2141 estimate alongside),
+  coplanar waveguide with ground (Wadell, the formula chemandy.com uses), coplanar waveguide without
+  ground, stripline, and differential microstrip / stripline pairs. Results include εeff, delay per mm,
+  velocity factor and the quarter-wave length at a frequency. Copper thickness is taken into account.
+- **SMD pad size (IPC-7351B):** enter the part's datasheet dimensions (or start from 0201 - 2512, SOIC,
+  SOT-23, TSSOP, QFP or QFN presets), pick density level A, B or C, and get the pad size, pad spacing,
+  how far each pad must reach past the terminal (toe, heel, side) and the courtyard.
+- **Copper:** trace width for a current (IPC-2221), trace resistance, skin depth.
+- **RF:** Pi / T attenuators, return loss / VSWR / mismatch loss, LC resonance.
+
 ## Supplier API keys
 
 LCSC works immediately. Digi-Key, Mouser, Farnell/Newark, TME and Octopart each give out
