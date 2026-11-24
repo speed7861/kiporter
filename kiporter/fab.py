@@ -17,7 +17,7 @@ from typing import Callable
 
 from . import bom
 from .config import Settings
-from .kicad_env import NO_WINDOW, KiCadInstall
+from .kicad_env import NO_WINDOW, run_cli, KiCadInstall
 
 Log = Callable[[str], None]
 
@@ -190,6 +190,8 @@ def delete_custom_profile(settings: Settings, name: str) -> None:
 class FabOptions:
     profile: str = "JLCPCB"
     refill_drc: bool = True
+    drc_report: bool = True  # keep the DRC report in the Build folder (and so in the zip)
+    subtract_soldermask: bool | None = None  # None = as the board setup says
     schematic_pdf: bool = True
     bom: bool = True
     gerbers: bool = True
@@ -217,7 +219,7 @@ def build_dir_for(project_file: Path) -> Path:
 
 
 def _run(ki: KiCadInstall, *args, timeout: int = 600) -> subprocess.CompletedProcess:
-    return subprocess.run(ki.cli_cmd(*args), capture_output=True, text=True, timeout=timeout,
+    return run_cli(ki.cli_cmd(*args), capture_output=True, text=True, timeout=timeout,
                           creationflags=NO_WINDOW)
 
 
@@ -275,6 +277,9 @@ def _plot_pdfs(ki: KiCadInstall, pcb: Path, out: Path, layers: list[str], common
 def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: FabOptions,
              log: Log = print) -> FabResult:
     prof = get_profile(opts.profile, settings)
+    if opts.subtract_soldermask is not None:
+        prof = FabProfile(prof.name, {**prof.options, "subtract_soldermask": bool(opts.subtract_soldermask)},
+                          prof.custom)
     name = project_file.stem
     build = build_dir_for(project_file)
     gdir = build / "Gerbers"
@@ -293,7 +298,9 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
         # 1) refill zones + DRC (on the copy)
         if opts.refill_drc and work_pcb:
             log("Refilling zones and running DRC…")
-            rpt = build / f"{name}-DRC.rpt"
+            rpt = (build if opts.drc_report else td) / f"{name}-DRC.rpt"
+            if not opts.drc_report:
+                (build / rpt.name).unlink(missing_ok=True)  # an old report would no longer match the board
             r = _run(ki, "pcb", "drc", work_pcb, "-o", rpt, "--format", "report", "--refill-zones", "--save-board",
                      "--severity-error", "--severity-warning", "--units", "mm",
                      *(["--schematic-parity"] if sch.exists() else []))
@@ -302,10 +309,12 @@ def generate(project_file: Path, ki: KiCadInstall, settings: Settings, opts: Fab
                 counts = {k: int(n) for n, k in re.findall(r"Found (\d+) (DRC violations|unconnected pads|"
                                                               r"schematic parity issues|Footprint errors)", txt)}
                 res.drc_summary = ", ".join(f"{v} {k}" for k, v in counts.items()) or "no problems found"
-                res.files.append(rpt)
-                log(f"DRC: {res.drc_summary}  (report: {rpt.name})")
+                if opts.drc_report:
+                    res.files.append(rpt)
+                log(f"DRC: {res.drc_summary}" + (f"  (report: {rpt.name})" if opts.drc_report else ""))
                 if any(counts.values()):
-                    res.warnings.append(f"DRC reports {res.drc_summary} - check {rpt.name} before ordering.")
+                    where = rpt.name if opts.drc_report else "the DRC in KiCad"
+                    res.warnings.append(f"DRC reports {res.drc_summary} - check {where} before ordering.")
             elif r.returncode != 0:
                 res.warnings.append(f"DRC failed: {(r.stderr or r.stdout).strip()[:300]}")
 

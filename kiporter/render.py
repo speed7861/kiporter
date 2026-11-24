@@ -8,13 +8,12 @@ from __future__ import annotations
 import math
 import re
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Callable
 
 from . import sexpr
-from .kicad_env import NO_WINDOW, KiCadInstall
+from .kicad_env import NO_WINDOW, run_cli, KiCadInstall
 from .library import pick_model
 
 Pt = tuple[float, float]
@@ -373,7 +372,7 @@ def render_3d(ki: KiCadInstall, fp_file: Path, out_png: Path, models: list[Path]
         src.mkdir()
         shutil.copy2(fp_file, src / fp_file.name)
         up = td / "up.pretty"
-        subprocess.run(ki.cli_cmd("fp", "upgrade", "--force", src, "-o", up), capture_output=True,
+        run_cli(ki.cli_cmd("fp", "upgrade", "--force", src, "-o", up), capture_output=True,
                        timeout=120, creationflags=NO_WINDOW)
         files = list(up.glob("*.kicad_mod")) or [src / fp_file.name]
         node = sexpr.parse(files[0].read_text(encoding="utf-8", errors="replace"))
@@ -399,7 +398,7 @@ def render_3d(ki: KiCadInstall, fp_file: Path, out_png: Path, models: list[Path]
                    '(stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))\n')
         board = td / "preview.kicad_pcb"
         board.write_text(BOARD_HEAD + outline + sexpr.dump(node) + "\n)\n", encoding="utf-8")
-        r = subprocess.run(ki.cli_cmd("pcb", "render", board, "-o", out_png, "--width", width, "--height", height,
+        r = run_cli(ki.cli_cmd("pcb", "render", board, "-o", out_png, "--width", width, "--height", height,
                                       "--rotate", rotate, "--quality", "basic", "--zoom", "0.9"),
                            capture_output=True, text=True, timeout=180, creationflags=NO_WINDOW)
         if r.returncode != 0 or not out_png.exists():

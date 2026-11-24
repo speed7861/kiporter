@@ -7,7 +7,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .kicad_env import NO_WINDOW, KiCadInstall
+from .kicad_env import NO_WINDOW, run_cli, KiCadInstall
 from .library import MODEL_EXTS, StagedPart
 
 
@@ -102,7 +102,7 @@ def _run_cli(ki: KiCadInstall, args: list[str]) -> bool:
     if not ki.cli:
         return False
     try:
-        r = subprocess.run(ki.cli_cmd(*args), capture_output=True, text=True,
+        r = run_cli(ki.cli_cmd(*args), capture_output=True, text=True,
                            timeout=120, creationflags=NO_WINDOW)
         return r.returncode == 0
     except (OSError, subprocess.SubprocessError):

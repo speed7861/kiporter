@@ -22,7 +22,7 @@ from typing import Callable
 
 from . import fields, sexpr
 from .config import Settings
-from .kicad_env import (NO_WINDOW, KiCadInstall, all_lib_entries, is_stock_kicad_path, kicad_env_vars,
+from .kicad_env import (NO_WINDOW, run_cli, KiCadInstall, all_lib_entries, is_stock_kicad_path, kicad_env_vars,
                         remove_lib_table_entry, resolve)
 from .library import (MODEL_EXTS, LibraryTarget, model_key, new_model_node, safe_name)
 
@@ -67,7 +67,7 @@ def validate_sym_lib(ki: KiCadInstall, sym_file: Path) -> str | None:
         return None
     with tempfile.TemporaryDirectory() as td:
         try:
-            r = subprocess.run(ki.cli_cmd("sym", "upgrade", "--force", sym_file, "-o",
+            r = run_cli(ki.cli_cmd("sym", "upgrade", "--force", sym_file, "-o",
                                           Path(td) / "check.kicad_sym"), capture_output=True, text=True,
                                timeout=180, creationflags=NO_WINDOW)
         except (OSError, subprocess.SubprocessError) as e:

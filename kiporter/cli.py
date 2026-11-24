@@ -574,7 +574,7 @@ def cmd_fab(ctx: Ctx) -> dict:
     if bf and not bom.is_kicad_choice(bf) and bf.lower() not in (f.name.lower() for f in bom.FORMATS):
         bf = bom.KICAD_PREFIX + bf  # a KiCad preset given by its own name
     bf = next((f.name for f in bom.FORMATS if f.name.lower() == bf.lower()), bf)
-    opts = fab.FabOptions(profile=prof, refill_drc=not a.no_drc, boards=a.boards,
+    opts = fab.FabOptions(profile=prof, refill_drc=not a.no_drc, drc_report=not a.no_drc_report, boards=a.boards,
                           file_type=ctx.settings.bom_file_type or "csv", bom_format=bf,
                           bom_kicad_format=a.kicad_format or "")
     res = fab.generate(pro, ctx.ki, ctx.settings, opts, log)
@@ -686,6 +686,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", help="board house (see 'kiporter formats'); default: the GUI's choice")
     p.add_argument("--boards", type=int, default=1)
     p.add_argument("--no-drc", action="store_true", help="skip zone refill and DRC")
+    p.add_argument("--no-drc-report", action="store_true", help="run DRC but leave its report out of the Build folder")
     p.add_argument("--bom-format", help="override the board house's BOM format (a format or a KiCad BOM preset)")
     p.add_argument("--kicad-format", help="KiCad format preset for a KiCad BOM preset (default: the project's)")
     p.add_argument("--zip", action="store_true", help="also create '<Project> Build.zip'")

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import fields
 from .config import Settings
-from .kicad_env import NO_WINDOW, KiCadInstall
+from .kicad_env import NO_WINDOW, run_cli, KiCadInstall
 
 
 # ==================================================================== data
@@ -124,7 +124,7 @@ def read_bom(project_file: Path, ki: KiCadInstall, settings: Settings) -> list[B
     flist = ["Reference", "Value", "Footprint", "Datasheet", "Description", "${QUANTITY}", "${DNP}"] + extra
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "bom.csv"
-        r = subprocess.run(ki.cli_cmd("sch", "export", "bom", sch, "-o", out, "--fields", ",".join(flist),
+        r = run_cli(ki.cli_cmd("sch", "export", "bom", sch, "-o", out, "--fields", ",".join(flist),
                                       "--labels", ",".join(flist),
                                       "--group-by", ",".join(["Value", "Footprint", "${DNP}"] + wanted["mpn"]),
                                       "--ref-delimiter", ",", "--ref-range-delimiter", ""),
@@ -163,7 +163,7 @@ def read_positions(project_file: Path, ki: KiCadInstall) -> list[Placement]:
         raise RuntimeError(f"PCB not found: {pcb}")
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "pos.csv"
-        r = subprocess.run(ki.cli_cmd("pcb", "export", "pos", pcb, "-o", out, "--format", "csv", "--units", "mm",
+        r = run_cli(ki.cli_cmd("pcb", "export", "pos", pcb, "-o", out, "--format", "csv", "--units", "mm",
                                       "--side", "both"),
                            capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW)
         if r.returncode != 0 or not out.exists():
@@ -671,7 +671,7 @@ def export_kicad_template(t: KicadTemplate, project_file: Path, ki: KiCadInstall
             raise RuntimeError("The BOM plugin script was not found - select it to locate the .py file.")
         with tempfile.TemporaryDirectory() as td:
             xml = Path(td) / "netlist.xml"
-            r = subprocess.run(ki.cli_cmd("sch", "export", "python-bom", sch, "-o", xml), capture_output=True,
+            r = run_cli(ki.cli_cmd("sch", "export", "python-bom", sch, "-o", xml), capture_output=True,
                                text=True, timeout=300, creationflags=NO_WINDOW)
             if not xml.exists():
                 raise RuntimeError(f"kicad-cli netlist export failed: {(r.stderr or r.stdout).strip()}")
@@ -703,7 +703,7 @@ def export_kicad_template(t: KicadTemplate, project_file: Path, ki: KiCadInstall
         args.append("--keep-tabs")
     if fmt.get("keep_line_breaks"):
         args.append("--keep-line-breaks")
-    r = subprocess.run(ki.cli_cmd(*args), capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW)
+    r = run_cli(ki.cli_cmd(*args), capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW)
     if r.returncode != 0 or not out.exists():
         raise RuntimeError(f"kicad-cli BOM export failed: {(r.stderr or r.stdout).strip()}")
     return [out]

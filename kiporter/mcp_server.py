@@ -312,7 +312,7 @@ def export_bom(format: str = "JLCPCB", project: str | None = None, out_dir: str 
 
 @mcp.tool(annotations=WRITE)
 def generate_fabrication(project: str | None = None, profile: str | None = None, boards: int = 1,
-                         refill_and_drc: bool = True, make_zip: bool = False, bom_format: str | None = None,
+                         refill_and_drc: bool = True, drc_report: bool = True, make_zip: bool = False, bom_format: str | None = None,
                          kicad_format: str | None = None) -> dict[str, Any]:
     """Write '<Project> Build' next to the project: Gerbers, drill, BOM, placement file, schematic PDF and a
     DRC report (zones are refilled on a copy; the board file is not changed). make_zip: also write
@@ -324,6 +324,7 @@ def generate_fabrication(project: str | None = None, profile: str | None = None,
     _opt(argv, "--project", project)
     _opt(argv, "--profile", profile)
     _opt(argv, "--no-drc", not refill_and_drc)
+    _opt(argv, "--no-drc-report", not drc_report)
     _opt(argv, "--zip", make_zip)
     return _run(argv)
 

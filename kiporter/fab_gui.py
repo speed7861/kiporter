@@ -17,6 +17,7 @@ APP_TITLE = "Kiporter"
 class FabTab(ttk.Frame):
     STEPS = [("refill_drc", "Refill all zones (copper pours) and run DRC + schematic parity - on a copy, "
                             "your board file is not changed"),
+             ("drc_report", "Put the DRC report in the Build folder (and the production zip)"),
              ("schematic_pdf", "Schematic PDF"),
              ("bom", "BOM in the shop's format"),
              ("gerbers", "Gerbers (all copper, mask, paste, silkscreen and outline layers)"),
@@ -66,9 +67,19 @@ class FabTab(ttk.Frame):
         box.pack(fill="x", pady=4)
         self.steps: dict[str, tk.BooleanVar] = {}
         for key, label in self.STEPS:
-            v = tk.BooleanVar(value=True)
+            v = tk.BooleanVar(value=bool(s.fab_steps.get(key, True)))
             self.steps[key] = v
-            ttk.Checkbutton(box, text=label, variable=v).pack(anchor="w", padx=8, pady=1)
+            cb = ttk.Checkbutton(box, text=label, variable=v, command=self._steps_changed)
+            cb.pack(anchor="w", padx=(28 if key == "drc_report" else 8, 8), pady=1)
+            if key == "drc_report":
+                self.drc_report_cb = cb
+            if key == "gerbers":
+                # per-build override of the board setup's option; reset when the board house changes
+                self.sub_mask = tk.BooleanVar()
+                self.sub_mask_cb = ttk.Checkbutton(box, text="Subtract soldermask from silkscreen (clips silkscreen "
+                                                   "off pads and other mask openings)", variable=self.sub_mask)
+                self.sub_mask_cb.pack(anchor="w", padx=(28, 8), pady=1)
+        self._steps_changed(save=False)
 
         bf = ttk.Frame(self)
         bf.pack(fill="x", pady=8)
@@ -138,14 +149,23 @@ class FabTab(ttk.Frame):
 
     def _show_kfmt(self) -> None:
         prof = fab.get_profile(self._profile_name(), self.app.settings)
-        kicad = bom.is_kicad_choice(self._bom_choice() or prof.bom_format)
+        choice = self._bom_choice() or prof.bom_format or ""
+        kicad = bom.is_kicad_choice(choice)
         for w in (self.kfmt_label, self.kfmt, self.ftype_box):
             w.pack_forget()
-        if kicad:
+        if kicad and "BOM plugin" not in choice:  # a plugin script writes its own file format
             self.kfmt_label.pack(side="left")
             self.kfmt.pack(side="left", padx=6)
-        else:
+        elif not kicad:
             self.ftype_box.pack(side="left")
+
+    def _steps_changed(self, save: bool = True) -> None:
+        # the report only exists when DRC runs
+        self.drc_report_cb.state(["!disabled"] if self.steps["refill_drc"].get() else ["disabled"])
+        self.sub_mask_cb.state(["!disabled"] if self.steps["gerbers"].get() else ["disabled"])
+        if save:
+            self.app.settings.fab_steps = {k: v.get() for k, v in self.steps.items()}
+            self.app.settings.save()
 
     def _bom_changed(self) -> None:
         s = self.app.settings
@@ -156,6 +176,7 @@ class FabTab(ttk.Frame):
     def _profile_changed(self) -> None:
         prof = fab.get_profile(self._profile_name(), self.app.settings)
         self.notes.set(prof.notes or "")
+        self.sub_mask.set(bool(prof.opt("subtract_soldermask")))
         self.app.settings.fab_profile = prof.name
         self.app.settings.save()
         self.refresh()
@@ -189,6 +210,7 @@ class FabTab(ttk.Frame):
             return
         opts = fab.FabOptions(profile=self._profile_name(), boards=max(int(self.boards.get() or 1), 1),
                               file_type=self.ftype.get(), bom_format=self._bom_choice(),
+                              subtract_soldermask=self.sub_mask.get(),
                               bom_kicad_format=self._kfmt_choice(), **{k: v.get() for k, v in self.steps.items()})
         self.go_btn.state(["disabled"])
         self.busy.set("Working…")

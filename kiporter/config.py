@@ -133,6 +133,7 @@ class Settings:
     bom_include_dnp: bool = False
     bom_export_cpl: bool = True
     fab_profile: str = "JLCPCB"
+    fab_steps: dict = field(default_factory=dict)  # Fabrication tab checkboxes, remembered
     fab_bom_format: str = ""  # Build folder BOM: "" = the board setup's format, else a format / KiCad preset
     fab_bom_kicad_format: str = ""  # delimiters for a KiCad preset ("" = the project's own)
     custom_fab_profiles: list = field(default_factory=list)

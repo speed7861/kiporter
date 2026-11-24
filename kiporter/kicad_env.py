@@ -19,6 +19,93 @@ NO_WINDOW = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW
 FLATPAK_ID = "org.kicad.KiCad"
 
 
+# ==================================================================== running kicad-cli
+PLUGIN_PIP_GRACE = 20  # seconds a KiCad plugin's pip install may hold up a kicad-cli run
+
+
+def _children(pid: int) -> list[tuple[int, str]]:
+    """(pid, exe path) of a process's direct children (Windows)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class PE(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+    k = ctypes.windll.kernel32
+    k.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    k.OpenProcess.restype = ctypes.c_void_p
+    snap = k.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
+    if not snap or snap == ctypes.c_void_p(-1).value:
+        return []
+    out = []
+    try:
+        e = PE()
+        e.dwSize = ctypes.sizeof(PE)
+        ok = k.Process32FirstW(ctypes.c_void_p(snap), ctypes.byref(e))
+        while ok:
+            if e.th32ParentProcessID == pid:
+                path = e.szExeFile
+                h = k.OpenProcess(0x1000, False, e.th32ProcessID)  # PROCESS_QUERY_LIMITED_INFORMATION
+                if h:
+                    buf = ctypes.create_unicode_buffer(1024)
+                    n = wintypes.DWORD(1024)
+                    if k.QueryFullProcessImageNameW(ctypes.c_void_p(h), 0, buf, ctypes.byref(n)):
+                        path = buf.value
+                    k.CloseHandle(ctypes.c_void_p(h))
+                out.append((e.th32ProcessID, path))
+            ok = k.Process32NextW(ctypes.c_void_p(snap), ctypes.byref(e))
+    finally:
+        k.CloseHandle(ctypes.c_void_p(snap))
+    return out
+
+
+def _kill_tree(pid: int) -> None:
+    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=NO_WINDOW)
+
+
+def run_cli(cmd: list, timeout: float = 600, log=None, **_ignored) -> subprocess.CompletedProcess:
+    """subprocess.run for kicad-cli. KiCad 10 sets up the Python environments of installed plugins
+    when it starts, and kicad-cli waits for that pip install before it exits - if pip stalls (network,
+    proxy) every export stalls with it. A plugin pip install still running after PLUGIN_PIP_GRACE
+    seconds is stopped (KiCad simply retries it the next time it starts)."""
+    cmd = [str(c) for c in cmd]
+    if not IS_WIN:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    import time
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                         errors="replace", creationflags=NO_WINDOW)
+    start = time.monotonic()
+    seen: dict[int, float] = {}
+    while True:
+        try:
+            out, err = p.communicate(timeout=1)
+            return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.monotonic()
+        if now - start > timeout:
+            _kill_tree(p.pid)
+            p.communicate()
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        try:
+            kids = _children(p.pid)
+        except Exception:  # noqa: BLE001
+            kids = []
+        for kid, path in kids:
+            low = path.lower().replace("/", "\\")
+            if "python-environments" not in low:
+                continue
+            first = seen.setdefault(kid, now)
+            if now - first > PLUGIN_PIP_GRACE:
+                _kill_tree(kid)
+                seen[kid] = float("inf")
+                if log:
+                    log("A KiCad plugin's pip install was holding up kicad-cli - stopped it.")
+
+
 def _ver_key(v: str) -> tuple:
     return tuple(int(p) if p.isdigit() else 0 for p in re.split(r"[.\-]", v))
 

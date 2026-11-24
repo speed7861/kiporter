@@ -175,6 +175,7 @@ kiporter fab --profile JLCPCB --zip              # Build folder (Gerbers, drill,
 kiporter formats --project my.kicad_pro         # BOM formats (and your KiCad BOM presets), board houses, suppliers
 kiporter bom-export --format "My JLC" --kicad-format Pipes   # a BOM preset made in KiCad
 kiporter fab --bom-format "My JLC"               # Build folder with your KiCad BOM preset
+kiporter fab --no-drc-report                     # run DRC but leave its report out
 kiporter update-pcb                              # Update PCB from Schematic in the open KiCad
 ```
 
@@ -295,7 +296,10 @@ One click creates a `<Project> Build` folder containing:
 **Create production zip** zips the whole folder into `<Project> Build.zip` in the project folder,
 ready to send.
 
-Zones are refilled and DRC is run on a copy first, so your board file is never changed.
+Zones are refilled and DRC is run on a copy first, so your board file is never changed. You can
+leave the DRC report out of the Build folder (DRC still runs and its result is shown), and turn
+**Subtract soldermask from silkscreen** on or off for one build without making a custom setup.
+Your choices are remembered.
 
 The BOM can be the board house's format or any BOM preset you made in KiCad, with the KiCad
 format preset of your choice (delimiters, quoting). The placement file stays in the board
